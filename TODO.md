@@ -1,3 +1,5 @@
+10/12/2025
+
 - CRISP-DM (metodología)
 
 - mecanismo olvido: ventana temporal
@@ -32,6 +34,10 @@ Comprobación de la firma digital. Problemas:
 Datasets de papers: hecho en latex
 
 Librería de DOME: https://github.com/danielriveroc/DoMEv1
+
+SLUM: colas para el cesga creo, esto cuando tenga el cesga
+
+
 
 
 
