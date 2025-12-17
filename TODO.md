@@ -33,11 +33,11 @@ Comprobación de la firma digital. Problemas:
 
 Datasets de papers: hecho en latex
 
-Librería de DOME: https://github.com/danielriveroc/DoMEv1
+Librería de DOME: https://github.com/danielriveroc/SymDoME.jl
 
 SLUM: colas para el cesga creo, esto cuando tenga el cesga
 
 
+17/12/20
 
-
-
+Para el cesga ya he pedido la cuenta, ahora toca hacer lo que dijo dani de los primeros experimentos
