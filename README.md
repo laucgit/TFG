@@ -1,6 +1,6 @@
 # TFG: **Stream Learning con DoME**
 
-Este repositorio contiene el código y los experimentos de mi Trabajo de Fin de Grado (TFG) centrado en el uso de **Stream Learning** combinado con la técnica de **DoME** (Development of Mathematical Expressions). El objetivo de este TFG es evaluar cómo los modelos de regresión simbólica (DoME) pueden adaptarse a **entornos de aprendizaje en flujo**.
+Este repositorio contiene el código y los experimentos de mi TFG centrado en el uso de **Stream Learning** combinado con la técnica de **DoME** (Development of Mathematical Expressions). El objetivo de este TFG es evaluar cómo los modelos de regresión simbólica (DoME) pueden adaptarse a **entornos de aprendizaje en flujo**.
 
 ## Descripción
 
