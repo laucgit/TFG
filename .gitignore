@@ -1,2 +1,4 @@
 /data
 *.toml
+/resultados_experimentos
+/plots
