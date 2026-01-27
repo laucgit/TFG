@@ -2,7 +2,7 @@
 
 julia_version = "1.11.0-rc3"
 manifest_format = "2.0"
-project_hash = "e1b4a6f82b66cd0836d205952a1e8d5ea25b23ad"
+project_hash = "49e9efa3fef464ea63a66aa9f3c37c51b811819b"
 
 [[deps.AliasTables]]
 deps = ["PtrArrays", "Random"]
@@ -867,6 +867,12 @@ version = "1.11.0"
 deps = ["Artifacts", "Libdl", "libblastrampoline_jll"]
 uuid = "bea87d4a-7f5b-5778-9afe-8cc45184846c"
 version = "7.7.0+0"
+
+[[deps.SymDoME]]
+deps = ["Statistics"]
+path = "SymDoME.jl"
+uuid = "b4f4f0b4-37e5-4265-8ded-9d4e2df27f01"
+version = "1.0.4"
 
 [[deps.TOML]]
 deps = ["Dates"]
