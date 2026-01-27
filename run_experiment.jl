@@ -14,7 +14,7 @@ struct DoMEParams
     min_improvement::Float64
 end
 
-# Intentar importar las funciones de estrategia desde SymDoME
+# Intentar importar las funciones de estrategia desde SymDoME (ver esto, igual hay que quitarlo)
 STRATEGY_FUNCTIONS = Dict{Symbol, Any}()
 
 try
@@ -73,7 +73,7 @@ function run_experiment(;
         :minimumReductionMSE => params.min_improvement
     )
     
-    # Solo agregar strategy si encontramos la función
+    # Solo añadir strategy si encontramos la función
     if strategy_fn !== nothing
         dome_kwargs[:strategy] = strategy_fn
         println("   Usando función de estrategia: $strategy")
@@ -245,7 +245,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
     println("="^60)
 
     run_experiment(
-        dataset = "data/ElectricDevices/LD2011_2014_mini.txt",
+        dataset = "data/ElectricDevices/LD2011_2014_mini.txt", #hay que cambiarlo para no hardcodear
         target_col = "MT_196",  # Especificar la columna objetivo
         window = 24,
         horizon = 1,
