@@ -43,81 +43,17 @@ SLUM: colas para el cesga creo, esto cuando tenga el cesga
 Para el cesga ya he pedido la cuenta, ahora toca hacer lo que dijo dani de los primeros experimentos
 
 
-14/01/2026
+27/01/2026
 
-\chapter{Metodología y validación del pipeline}
-\label{chap:metodoloxia}
+Los scripts que he trabajado hoy incluyen:
 
-En este capítulo se describe el pipeline de procesamiento y entrenamiento desarrollado, así como el procedimiento seguido para su validación preliminar. El objetivo principal de esta fase es garantizar el correcto funcionamiento del sistema antes de su ejecución a gran escala en un entorno de computación de alto rendimiento.
+1. **`run_experiment.jl`**: Este script ejecuta el experimento principal, donde se lleva a cabo la generación y evaluación de las expresiones matemáticas. He corregido y ajustado la estructura para asegurar que los modelos generados se ajusten correctamente a los datos de entrada y salida.
 
-\section{Pipeline de procesamiento de series temporales}
+2. **`sweep_experiments.jl`**: Este script permite realizar barridos de parámetros, evaluando diferentes configuraciones de hiperparámetros para el modelo. Esto me ha permitido experimentar con varias combinaciones para encontrar la configuración más óptima.
 
-Se implementó un pipeline base para el procesamiento de series temporales y el entrenamiento de modelos predictivos. Este pipeline constituye la base sobre la que se apoyarán posteriormente los experimentos masivos y la comparación con métodos más avanzados.
+3. **`load_data.jl`**: Este archivo se encarga de cargar los datos necesarios para los experimentos, asegurando que los conjuntos de entrenamiento y prueba estén listos para ser utilizados en el proceso de ajuste de los modelos.
 
-El pipeline se estructura en las siguientes etapas:
+4. **`crear_minidataset.jl`**: He utilizado este script para crear un conjunto de datos reducido que facilita las pruebas rápidas y la depuración de los experimentos sin necesidad de cargar grandes volúmenes de datos.
 
-\subsection{Carga del dataset}
-
-Se empleó el conjunto de datos \textit{ElectricDevices}, perteneciente al repositorio UCR/UEA de series temporales. El sistema de carga se diseñó de forma robusta para soportar automáticamente los formatos \texttt{.ts} y \texttt{.tsv}, detectando el formato disponible y parseando correctamente tanto las series temporales como sus etiquetas.
-
-Este diseño permite reutilizar el pipeline con otros datasets del repositorio sin necesidad de modificaciones adicionales en el código.
-
-\subsection{Normalización}
-
-Las series temporales se normalizaron mediante estandarización \textit{z-score}, calculando la media y la desviación típica por característica. Este paso tiene como objetivo evitar diferencias de escala entre variables y mejorar la estabilidad del entrenamiento de los modelos.
-
-\subsection{Construcción de ventanas temporales}
-
-A partir de las series originales se generaron ventanas temporales deslizantes de tamaño fijo. Este proceso transforma el problema original en un formato supervisado, donde cada ventana se asocia a una salida desplazada en el tiempo según un horizonte de predicción configurable.
-
-El tamaño de ventana y el horizonte de predicción se definen como hiperparámetros del sistema y se utilizan posteriormente en el diseño experimental.
-
-\subsection{División temporal de los datos}
-
-Los datos se dividieron en conjuntos de entrenamiento y test respetando el orden temporal de las muestras. El conjunto de test se corresponde con el tramo final de la serie temporal, evitando así fugas de información temporal y reproduciendo un escenario de predicción realista.
-
-\section{Modelo baseline}
-
-Como modelo de referencia se empleó un modelo lineal entrenado mediante mínimos cuadrados. Este modelo se utiliza con un propósito exclusivamente metodológico, sirviendo como baseline para:
-
-\begin{itemize}
-    \item validar el correcto funcionamiento del pipeline,
-    \item comprobar la coherencia de los datos generados,
-    \item establecer una línea base para comparaciones posteriores.
-\end{itemize}
-
-La evaluación del modelo se realiza mediante el error cuadrático medio (MSE), métrica estándar en problemas de predicción de series temporales.
-
-\section{Definición del experimento}
-
-Se definió un experimento como una combinación concreta de los siguientes parámetros:
-
-\begin{itemize}
-    \item tamaño de ventana temporal,
-    \item horizonte de predicción,
-    \item proporción de datos destinada a test.
-\end{itemize}
-
-Para cada configuración, el pipeline completo se ejecuta de forma automática, entrenando el modelo y evaluándolo sobre el conjunto de test.
-
-Con el objetivo de garantizar la reproducibilidad y facilitar el análisis posterior, los resultados de cada experimento se almacenan automáticamente en ficheros CSV, incluyendo tanto los valores de los parámetros como la métrica de evaluación obtenida.
-
-\section{Validación preliminar del sistema}
-
-Antes de ejecutar experimentos a gran escala en un entorno de computación distribuida, se llevó a cabo una validación preliminar en local con un conjunto reducido de configuraciones. Esta fase tiene como finalidad:
-
-\begin{itemize}
-    \item verificar la estabilidad del pipeline,
-    \item comprobar la correcta ejecución de los experimentos,
-    \item asegurar el almacenamiento correcto de los resultados,
-    \item confirmar que el sistema es reproducible y escalable.
-\end{itemize}
-
-Esta validación se limita a comprobar el correcto funcionamiento del sistema y no pretende extraer conclusiones sobre el rendimiento del modelo ni sobre configuraciones óptimas, aspectos que se abordarán en fases posteriores del trabajo.
-
-\section{Preparación para ejecución a gran escala}
-
-Una vez validado el pipeline y el sistema de experimentos en local, el código quedó preparado para su ejecución en un entorno de computación de alto rendimiento. El uso de scripts autónomos, la gestión explícita de dependencias y el almacenamiento automático de resultados permiten escalar el número de experimentos sin modificar la lógica del sistema.
-
-En etapas posteriores, este pipeline se utilizará para realizar barridos completos de hiperparámetros y para comparar el modelo baseline con métodos más avanzados.
+falta pulir los scripts de plot
 
