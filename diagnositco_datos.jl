@@ -5,25 +5,6 @@ println("="^60)
 # Simular datos correctos para DoME
 using Statistics
 
-println("\n PROBLEMA IDENTIFICADO:")
-println("-"^60)
-println("DoME espera:")
-println("  - Cada FILA = una instancia/muestra")
-println("  - Cada COLUMNA = una variable/feature")
-println("")
-println("Con window=24, deberías tener:")
-println("  - Xtr: (N_muestras_train, 24)")
-println("  - Xte: (N_muestras_test, 24)")
-println("")
-println("Pero tus datos tienen:")
-println("  - Xtr: (992, 8856)  <- !8856 features es MUCHÍSIMO!")
-println("  - Xte: (314, 8856)")
-println("")
-
-println("="^60)
-println("PRUEBA CON DATOS SINTÉTICOS CORRECTOS")
-println("="^60)
-
 # Crear datos sintéticos bien formateados
 n_train = 100
 n_test = 30
@@ -51,7 +32,7 @@ try
     using SymDoME
     
     println("\n" * "="^60)
-    println("EJECUTANDO DOME CON DATOS SINTÉTICOS CORRECTOS")
+    println("EJECUTANDO DOME CON DATOS SINTÉTICOS")
     println("="^60)
     
     tree, history = dome(
@@ -62,7 +43,7 @@ try
         showText = true
     )
     
-    println("\n DOME FUNCIONÓ CORRECTAMENTE!")
+    println("\nDOME FUNCIONÓ CORRECTAMENTE!")
     println("\nÁrbol generado:")
     println(tree)
     
@@ -71,30 +52,23 @@ try
         println("  Nodo $i: MSE = $mse")
     end
     
-    # Evaluar en test
-    y_pred = SymDoME.evaluate(tree, X_test)
+    # Evaluar en test (USAR evaluateTree, no evaluate)
+    println("\nEvaluando en test...")
+    y_pred = zeros(size(X_test, 1))
+    for i in eachindex(y_pred)
+        y_pred[i] = SymDoME.evaluateTree(tree, X_test[i, :])
+    end
+    
     mse_test = mean((y_pred .- y_test).^2)
     
     println("\nMSE en test: ", mse_test)
     
     if mse_test > 0.01
-        println("O El MSE es razonable (> 0)")
+        println("El MSE es razonable")
     end
     
-    println("\n" * "="^60)
-    println("CONCLUSIÓN")
-    println("="^60)
-    println("DoME funciona correctamente con datos bien formateados.")
-    println("El problema está en cómo se cargan/preparan los datos en load_data.jl")
-    println("")
-    println("SOLUCIÓN NECESARIA:")
-    println("  1. Revisar load_data.jl")
-    println("  2. Con window=24, debes tener SOLO 24 features (columnas)")
-    println("  3. No 8856 features")
-    println("  4. Posiblemente hay un error en cómo se crea la ventana deslizante")
-    
 catch e
-    println("\n Error al ejecutar DoME:")
+    println("\nError al ejecutar DoME:")
     println(e)
     println("\nStacktrace:")
     for (exc, bt) in Base.catch_stack()
