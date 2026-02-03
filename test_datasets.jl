@@ -1,162 +1,195 @@
-# test_datasets.jl
 include("run_experiment_multi.jl")
 using Statistics
 using SymDoME
+using Random
 
 println("="^70)
-println("TEST RÁPIDO - VERIFICACIÓN DE DATASETS")
+println("TEST DE VALIDACIÓN - Todos los datasets del sweep")
+println("="^70)
+println("\nOBJETIVO: Verificar que DoME funciona en los 4 datasets antes de CESGA")
+println("\nESTRATEGIA:")
+println("  - Mismo conjunto de datasets y target_cols que el sweep")
+println("  - Window=12 (el más pequeño, para rapidez)")
+println("  - 2000 muestras train / 500 test (cap)")
+println("  - 6 configuraciones por dataset")
+println("  - Si un dataset falla, se sigue con los demás")
 println("="^70)
 
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
+# Mismo diccionario que en sweep_experiments_multi.jl
+datasets_config = Dict(
+    "ETT/ETTh2.csv" => "OT",
+    "ETT/ETTm1.csv" => "OT",
+    "ElectricDevices/LD2011_2014.txt" => "MT_196",
+    "LCDS/LCD_USW00094789_2024.csv" => "HourlyDryBulbTemperature"
+)
 
-function limit_data_size(Xtr, ytr, Xte, yte, max_samples)
-    n_train = min(size(Xtr, 1), max_samples)
-    n_test  = min(size(Xte, 1), max_samples ÷ 2)
-    return Xtr[1:n_train, :], ytr[1:n_train], Xte[1:n_test, :], yte[1:n_test]
-end
-
-count_nonfinite(A::AbstractArray{Float64}) = count(v -> !isfinite(v), A)
-
-# Imputación: sustituir NaN/Inf por la media de la columna (o 0 si no hay finitos)
-function impute_nonfinite!(X::Matrix{Float64})
-    n, d = size(X)
-    for j in 1:d
-        s = 0.0; c = 0
-        @inbounds for i in 1:n
-            v = X[i, j]
-            if isfinite(v)
-                s += v; c += 1
-            end
-        end
-        μ = (c > 0) ? (s / c) : 0.0
-        @inbounds for i in 1:n
-            v = X[i, j]
-            if !isfinite(v)
-                X[i, j] = μ
-            end
-        end
-    end
-    return X
-end
-
-function impute_nonfinite!(y::Vector{Float64})
-    s = 0.0; c = 0
-    @inbounds for v in y
-        if isfinite(v)
-            s += v; c += 1
-        end
-    end
-    μ = (c > 0) ? (s / c) : 0.0
-    @inbounds for i in eachindex(y)
-        if !isfinite(y[i])
-            y[i] = μ
-        end
-    end
-    return y
-end
-
-# ------------------------------------------------------------
-# Configuración de test
-# ------------------------------------------------------------
+window = 12  # El más pequeño del sweep, suficiente para validar
 
 test_configs = [
-    Dict("name" => "ElectricDevices/LD2011_2014_mini.txt",
-         "target_col" => "MT_196",
-         "window" => 12,
-         "max_nodes" => 10,
-         "max_samples" => 200),
-
-    Dict("name" => "CinCECGTorso",
-         "target_col" => nothing,
-         "window" => 12,
-         "max_nodes" => 10,
-         "max_samples" => 200),
-
-    Dict("name" => "CAMBIAR!!",
-         "target_col" => nothing,     # importante: no fuerces índice aquí
-         "window" => 12,
-         "max_nodes" => 10,
-         "max_samples" => 200)
+    Dict("maxNodes" => 5,   "minReduction" => 1e-4, "useDiv" => false, "strategy" => SymDoME.Strategy4),
+    Dict("maxNodes" => 20,  "minReduction" => 1e-5, "useDiv" => false, "strategy" => SymDoME.Strategy4),
+    Dict("maxNodes" => 30,  "minReduction" => 1e-6, "useDiv" => false, "strategy" => SymDoME.Strategy3),
+    Dict("maxNodes" => 50,  "minReduction" => 1e-7, "useDiv" => true,  "strategy" => SymDoME.Strategy3),
+    Dict("maxNodes" => 100, "minReduction" => 1e-8, "useDiv" => false, "strategy" => SymDoME.Strategy4),
+    Dict("maxNodes" => 150, "minReduction" => 1e-9, "useDiv" => true,  "strategy" => SymDoME.Strategy3),
 ]
 
-# ------------------------------------------------------------
-# Ejecutar tests
-# ------------------------------------------------------------
+# Resumen global: un vector de (dataset_name, passed::Bool, best_improvement, best_config_idx, error_msg)
+global_results = Tuple{String, Bool, Float64, Any, String}[]
 
-for (i, config) in enumerate(test_configs)
+for (dataset_name, target_col) in datasets_config
+
     println("\n" * "="^70)
-    println("TEST $i/$(length(test_configs)): $(config["name"])")
+    println("DATASET: $dataset_name  →  target: $target_col")
     println("="^70)
 
     try
+        # Cargar datos
         Xtr, ytr, Xte, yte = load_dataset(
-            config["name"],
+            dataset_name,
             data_dir="data",
-            window=config["window"],
+            window=window,
             horizon=1,
-            target_col=config["target_col"],
+            target_col=target_col,
             train_ratio=0.75
         )
 
-        Xtr, ytr, Xte, yte = limit_data_size(Xtr, ytr, Xte, yte, config["max_samples"])
-        println("\n[LIMITADO] Xtr=$(size(Xtr)), ytr=$(size(ytr)), Xte=$(size(Xte)), yte=$(size(yte))")
+        # Limitar muestras para que sea rápido
+        n_samples = min(2000, size(Xtr, 1))
+        Xtr = Xtr[1:n_samples, :]
+        ytr = ytr[1:n_samples]
 
-        nf_before = (
-            count_nonfinite(Xtr),
-            count_nonfinite(ytr),
-            count_nonfinite(Xte),
-            count_nonfinite(yte)
-        )
-        if sum(nf_before) > 0
-            println("  [WARN] No finitos antes -> Xtr=$(nf_before[1]) ytr=$(nf_before[2]) Xte=$(nf_before[3]) yte=$(nf_before[4])")
-            println("  [INFO] Imputando (en vez de dropear filas)...")
+        n_test = min(500, size(Xte, 1))
+        Xte = Xte[1:n_test, :]
+        yte = yte[1:n_test]
+
+        println("\n[DATOS] Xtr=$(size(Xtr)), Xte=$(size(Xte))")
+
+        # Imputar (impute_nonfinite! viene de run_experiment_multi.jl)
+        impute_nonfinite!(Xtr)
+        impute_nonfinite!(ytr)
+        impute_nonfinite!(Xte)
+        impute_nonfinite!(yte)
+
+        # Normalizar
+        X_min = minimum(Xtr, dims=1)
+        X_max = maximum(Xtr, dims=1)
+        X_range = X_max .- X_min
+        X_range[X_range .== 0] .= 1.0
+
+        Xtr_norm = (Xtr .- X_min) ./ X_range
+        Xte_norm = (Xte .- X_min) ./ X_range
+
+        y_min = minimum(ytr)
+        y_max = maximum(ytr)
+        y_range = y_max - y_min
+        if y_range == 0
+            y_range = 1.0
         end
 
-        impute_nonfinite!(Xtr); impute_nonfinite!(ytr)
-        impute_nonfinite!(Xte); impute_nonfinite!(yte)
+        ytr_norm = (ytr .- y_min) ./ y_range
+        yte_norm = (yte .- y_min) ./ y_range
 
-        nf_after = (
-            count_nonfinite(Xtr),
-            count_nonfinite(ytr),
-            count_nonfinite(Xte),
-            count_nonfinite(yte)
-        )
-        println("  [OK] No finitos después -> Xtr=$(nf_after[1]) ytr=$(nf_after[2]) Xte=$(nf_after[3]) yte=$(nf_after[4])")
+        println("  OK: Imputado y normalizado")
 
-        if size(Xtr, 1) < 5
-            error("Muy pocas muestras (Xtr tiene $(size(Xtr,1)) filas).")
+        # Looping configs
+        dataset_passed = false
+        best_improvement = 0.0
+        best_config = nothing
+
+        for (i, cfg) in enumerate(test_configs)
+            println("\n  --- Config $i/$(length(test_configs)) ---")
+            println("    maxNodes=$(cfg["maxNodes"])  minReduction=$(cfg["minReduction"])  useDiv=$(cfg["useDiv"])  strategy=$(cfg["strategy"])")
+
+            try
+                Random.seed!(42 + i)
+
+                params = DoMEParams(
+                    cfg["maxNodes"],
+                    cfg["minReduction"],
+                    cfg["useDiv"],
+                    cfg["strategy"]
+                )
+
+                t_start = time()
+                tree, history = train_dome(Xtr_norm, ytr_norm, params)
+                t_elapsed = time() - t_start
+
+                ŷ_test, mse_test = evaluate_dome(tree, Xte_norm, yte_norm)
+
+                improvement = (1 - history[end]/history[1]) * 100
+
+                println("    MSE train: $(round(history[1], digits=6)) → $(round(history[end], digits=6))")
+                println("    MSE test:  $(round(mse_test, digits=6))")
+                println("    Mejora:    $(round(improvement, digits=2))%  |  Iters: $(length(history))  |  Tiempo: $(round(t_elapsed, digits=1))s")
+
+                if improvement > best_improvement
+                    best_improvement = improvement
+                    best_config = i
+                end
+
+                if improvement > 0.5
+                    println("    PASO: MEJORA DETECTADA")
+                    dataset_passed = true
+                else
+                    println("    FALLO: Sin mejora significativa")
+                end
+
+            catch e
+                println("    ERROR: $e")
+            end
         end
 
-        # Entrenar DoME
-        params = DoMEParams(config["max_nodes"], :selective, 1e-6)
+        # Resumen por dataset
+        println("\n  " * "-"^66)
+        if dataset_passed
+            println("  PASO: $dataset_name  (mejor mejora: $(round(best_improvement, digits=2))% en config $best_config)")
+        else
+            println("  FALLO: $dataset_name  (ninguna config mejora > 0.5%)")
+        end
+        println("  " * "-"^66)
 
-        println("\n[ENTRENANDO] DoME con max_nodes=$(config["max_nodes"])...")
-        tree, history = dome(
-            Xtr, ytr,
-            maximumNodes=params.max_nodes,
-            minimumReductionMSE=params.min_improvement
-        )
-
-        # Evaluar en test
-        ŷ_test = [SymDoME.evaluateTree(tree, Xte[j, :]) for j in 1:size(Xte, 1)]
-        mse_test = mean((ŷ_test .- yte).^2)
-
-        println("\n[RESULTADO]")
-        println("  ✓ MSE train (último): $(round(history[end], digits=6))")
-        println("  ✓ MSE test: $(round(mse_test, digits=6))")
-        println("  ✓ Iteraciones: $(length(history))")
-        println("  ✓ Dataset OK: $(config["name"])")
+        push!(global_results, (dataset_name, dataset_passed, best_improvement, best_config, ""))
 
     catch e
-        println("\n[ERROR] Falló el test para $(config["name"])")
-        println("  Mensaje: $e")
+        println("\n  ERROR AL CARGAR/PROCESAR $dataset_name:")
+        println("    $e")
         showerror(stdout, e, catch_backtrace())
-        println()
+        push!(global_results, (dataset_name, false, 0.0, nothing, string(e)))
     end
 end
 
+# =============================================================================
+# RESUMEN GLOBAL
+# =============================================================================
 println("\n" * "="^70)
-println("TESTS COMPLETADOS")
+println("RESUMEN GLOBAL")
+println("="^70)
+
+all_passed = true
+for (name, passed, best_imp, best_cfg, err) in global_results
+    if passed
+        println("  PASO: $name  →  mejor mejora $(round(best_imp, digits=2))% (config $best_cfg)")
+    elseif !isempty(err)
+        println("  FALLO: $name  →  ERROR: $err")
+        all_passed = false
+    else
+        println("  FALLO: $name  →  sin mejora significativa")
+        all_passed = false
+    end
+end
+
+println("="^70)
+if all_passed
+    println("\nTODOS LOS DATASETS PASARON")
+    println("\n>>> LISTO PARA CESGA <<<")
+else
+    n_passed = count(r -> r[2], global_results)
+    n_total  = length(global_results)
+    println("\nRESULTADO MIXTO: $n_passed/$n_total datasets pasaron")
+    println("\nLos que fallaron pueden ser:")
+    println("  - Archivos que no existen en data/ (verificar rutas)")
+    println("  - Datos sin señal simbólica clara (no es un bug, es del dataset)")
+    println("  - Consultar con tu profesor antes de subir a CESGA")
+end
 println("="^70)
