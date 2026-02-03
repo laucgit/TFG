@@ -97,38 +97,7 @@ Tengo que:
 
 - aislar más la función de train
 
-Problemas que ha encontrado ChatGPT que podrían ser relevantes:
-
-- Explosión de ficheros en sweep_experiments_multi.jl
-    Ahora run_experiment() siempre guarda 3 ficheros por experimento: resumen .csv + reporte .txt + predicciones _predictions.csv.
-    Con 2160 experimentos eso son ~6480 ficheros (y las predicciones de ElectricDevices pueden ser enormes). En HPC esto suele ser mala idea.
-
-- Detección de columnas numéricas frágil en load_data_multi.jl
-    Estás filtrando columnas numéricas por eltype(col) <: Real. Si una columna viene como Union{Missing, Float64}, te la puede excluir y/o la conversión Matrix{Float64} puede fallar si hay missing. Mejor detectarlo con Base.nonmissingtype.
-
-- Semilla “seed” no afecta si ejecutas run_experiment_multi.jl suelto
-    En sweep haces Random.seed!, pero en run_experiment_multi.jl no importas Random ni haces seed!. Si lanzas un experimento individual, ese seed solo aparece en el nombre del fichero.
-
 - quitar el parámetro de _model_ y ver si hay que quitar también el de _norm_.
 
 - ver cómo mando todo el entorno al CESGA para evitar tener problemas
-
-Cuestiones sobre cuestión de parada: 
-
-    yo: 
-
-        ahora mismo estoy entrenando con mis scripts hasta que el mse no mejore más??
-
-    Chatgpt: 
-
-        Sí: ahora mismo estás entrenando hasta que DoME deja de encontrar una mejora según tu umbral minimumReductionMSE (y entonces para por convergencia). Eso es exactamente lo que se ve en tu log cuando dice “Convergencia alcanzada en iteración …”.
-
-        Peeeero hay dos casos en tus logs:
-
-        Cuando aparece “Convergencia alcanzada en iteración X” → se ha parado porque ya no mejora lo suficiente (según el umbral).
-
-        Cuando aparece algo como “Iteraciones: 1001” sin mensaje de convergencia → ahí está parando por un límite máximo de pasos (un “cap”), no porque el MSE ya no pueda mejorar.
-
-        Si en CESGA quieres que sea “estrictamente hasta que no mejore más”, asegúrate de que no tengas ese cap (o súbelo mucho) o, mejor, déjalo pero guárdalo en el resultado para distinguir “converged” vs “hit cap”.
-
 
