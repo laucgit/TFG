@@ -10,23 +10,33 @@ using DelimitedFiles
         window::Int,
         horizon::Int = 1,
         train_ratio::Float64 = 0.75,
-        target_col::Union{String,Int,Nothing} = nothing
+        target_col::Union{String,Int,Nothing} = nothing,
+        univariate::Bool = false
     )
 
 Carga datasets en diferentes formatos y crea ventanas temporales.
 
+CAMBIO CRÍTICO:
+- Por defecto INCLUYE los lags del objetivo en los features (NO los elimina)
+- Esto es correcto para forecasting: X tiene t-window...t-1, y predice t+horizon
+- NO hay data leakage porque y está en el futuro respecto a X
+- Si univariate=true, usa SOLO lags del objetivo (autoregresivo puro)
+
 Formatos soportados:
 1. Archivo único (.txt, .csv) con división train/test por train_ratio
 2. Archivos separados (_TRAIN/_TEST o train/test)
-3. CAMBIAR!!
+3. ETT datasets (ETTh2.csv, ETTm1.csv)
+4. LCDS datasets (LCD_USW00094789_2024.csv)
+5. LD2011_2014_mini.txt (electricity data)
 
 Parámetros:
-- dataset_name: Nombre del dataset (ej: "ElectricDevices/LD2011_2014_mini.txt", "CinCECGTorso", "CAMBIAR!!")
+- dataset_name: Nombre del dataset
 - data_dir: Directorio base donde están los datasets
 - window: Tamaño de la ventana temporal
 - horizon: Pasos adelante para predecir
 - train_ratio: Proporción de datos para entrenamiento (solo si es archivo único)
 - target_col: Nombre o índice de la columna a predecir
+- univariate: Si true, usa SOLO lags del objetivo (autoregresivo)
 
 Retorna: Xtr, ytr, Xte, yte
 """
@@ -36,59 +46,43 @@ function load_dataset(
     window::Int,
     horizon::Int = 1,
     train_ratio::Float64 = 0.75,
-    target_col::Union{String,Int,Nothing} = nothing
+    target_col::Union{String,Int,Nothing} = nothing,
+    univariate::Bool = false
 )
     println("\n" * "="^70)
     println("CARGANDO DATASET: $dataset_name")
     println("="^70)
 
-    # Construir ruta base (si ya trae subruta, joinpath lo respeta)
+    # Construir ruta base
     base_path = joinpath(data_dir, dataset_name)
 
-    # Detección principal:
-    # - Si base_path es carpeta: buscar dentro
-    # - Si base_path es archivo: usarlo o buscar en su carpeta
     train_file = nothing
     test_file  = nothing
     single_file = nothing
 
-    # Elegir directorio donde buscar
     base_dir = isdir(base_path) ? base_path : dirname(base_path)
     base_name = basename(base_path)
     base_lower = lowercase(base_name)
 
-    # Si el directorio no existe, intentar en data_dir directamente
     if !isdir(base_dir)
         base_dir = data_dir
     end
 
-    # Helper local para elegir mejor candidato
     function choose_best(cands::Vector{String}, base_lower::String)
         if isempty(cands)
             return nothing
         end
-        # Preferir los que contengan el nombre base
         pref = [c for c in cands if occursin(base_lower, lowercase(basename(c)))]
         if !isempty(pref)
             return pref[1]
         end
-        # Caso especial PEMS_SF: los ficheros suelen llamarse PEMS_train/test
-        if base_lower == "pems_sf"
-            pref2 = [c for c in cands if occursin("pems", lowercase(basename(c)))]
-            if !isempty(pref2)
-                return pref2[1]
-            end
-        end
-        # Si solo hay uno, usarlo
         if length(cands) == 1
             return cands[1]
         end
-        # Si hay varios, coger el más corto (suele ser el "principal")
         sort!(cands, by = x -> length(basename(x)))
         return cands[1]
     end
 
-    # Buscar archivos reales
     if isdir(base_dir)
         all_files = readdir(base_dir)
 
@@ -102,315 +96,163 @@ function load_dataset(
 
             fl = lowercase(file)
 
-            # Ignorar labels siempre (especialmente PEMS)
             if occursin("label", fl)
                 continue
             end
 
-            # Train/Test separados
             if occursin("train", fl)
                 push!(train_candidates, full)
-                continue
             elseif occursin("test", fl)
                 push!(test_candidates, full)
-                continue
+            elseif endswith(fl, ".csv") || endswith(fl, ".txt")
+                push!(single_candidates, full)
             end
-
-            # Archivos únicos (no train/test)
-            push!(single_candidates, full)
         end
 
-        # Elegir mejor train/test (con preferencia por los que contengan base_lower)
         train_file = choose_best(train_candidates, base_lower)
         test_file  = choose_best(test_candidates, base_lower)
-
-        # Si no hay split train/test, elegir archivo único
-        if train_file === nothing || test_file === nothing
-            train_file = nothing
-            test_file = nothing
-
-            # Preferir el que contenga base_lower
-            single_pref = [c for c in single_candidates if occursin(base_lower, lowercase(basename(c)))]
-            if !isempty(single_pref)
-                single_file = single_pref[1]
-            else
-                # Si dataset_name trae extensión y existe, lo usamos
-                if isfile(base_path)
-                    single_file = base_path
-                else
-                    # Si solo hay un archivo "usable" en la carpeta, usarlo
-                    usable = [c for c in single_candidates if lowercase(splitext(c)[2]) in [".txt",".csv",".arff",".ts",""]]
-                    if length(usable) == 1
-                        single_file = usable[1]
-                    else
-                        single_file = nothing
-                    end
-                end
-            end
-        end
-    end
-
-    # Si dataset_name ya incluye extensión y existe (por si no entró en el bloque anterior)
-    if train_file === nothing && test_file === nothing && single_file === nothing && isfile(base_path)
+        single_file = choose_best(single_candidates, base_lower)
+    elseif isfile(base_path)
         single_file = base_path
     end
 
-    # Cargar según el formato encontrado
+    train_df = nothing
+    test_df  = nothing
+
     if train_file !== nothing && test_file !== nothing
-        println("Formato: Archivos train/test separados")
+        println("Formato: Archivos separados TRAIN/TEST")
         println("  Train: $train_file")
         println("  Test:  $test_file")
-        return load_separate_files(train_file, test_file, window, horizon, target_col)
+
+        println("\n[1/4] Leyendo archivos...")
+        train_df = safe_read_file(train_file)
+        test_df  = safe_read_file(test_file)
+
+        println("  Train: $(size(train_df))")
+        println("  Test:  $(size(test_df))")
+
     elseif single_file !== nothing
         println("Formato: Archivo único")
         println("  Archivo: $single_file")
-        return load_single_file(single_file, window, horizon, train_ratio, target_col)
+
+        println("\n[1/4] Leyendo archivo único...")
+        full_df = safe_read_file(single_file)
+        println("  Dataset: $(size(full_df))")
+
+        n = nrow(full_df)
+        split_idx = Int(floor(n * train_ratio))
+
+        println("\n[2/4] Separando train/test (ratio=$train_ratio)...")
+        train_df = full_df[1:split_idx, :]
+        test_df  = full_df[(split_idx+1):end, :]
+
+        println("  Train: $(size(train_df))")
+        println("  Test:  $(size(test_df))")
     else
-        error("No se encontró el dataset '$dataset_name' en '$data_dir'. Verificar rutas y nombres.")
+        error("No se encontraron archivos válidos para '$dataset_name' en '$base_dir'")
     end
+
+    # Paso común: definir target
+    step_offset = (train_file !== nothing && test_file !== nothing) ? 2 : 3
+    target_col_idx = get_target_column(train_df, target_col)
+    target_col_name = names(train_df)[target_col_idx]
+
+    println("\n[$step_offset/4] Columna objetivo: índice $target_col_idx - '$target_col_name'")
+
+    # Crear ventanas
+    println("\n[$((step_offset+1))/4] Creando ventanas temporales...")
+    Xtr, ytr, Xte, yte = create_windows(
+        train_df, test_df, target_col_idx, window, horizon, univariate
+    )
+
+    return Xtr, ytr, Xte, yte
 end
 
 """
-Carga un archivo único y divide en train/test
+Lee un archivo CSV/TXT de forma robusta.
 """
-function load_single_file(
-    filepath::String,
-    window::Int,
-    horizon::Int,
-    train_ratio::Float64,
-    target_col::Union{String,Int,Nothing}
-)
-    println("\n[1/4] Leyendo archivo único...")
-
-    # Detectar formato
+function safe_read_file(filepath::String)::DataFrame
     ext = lowercase(splitext(filepath)[2])
 
-    if ext == ".txt" || ext == ".csv" || ext == ""
-        df = load_txt_csv(filepath)
-    elseif ext == ".arff"
-        df = load_arff(filepath)
-    elseif ext == ".ts"
-        df = load_ts(filepath)
-    else
-        error("Formato no soportado: $ext")
+    if ext == ".csv"
+        try
+            df = CSV.read(filepath, DataFrame; silencewarnings=true)
+            if nrow(df) > 0 && ncol(df) > 0
+                return df
+            end
+        catch
+        end
     end
 
-    println("  Dataset: $(size(df))")
-
-    # Determinar columna objetivo
-    target_col_idx = get_target_column(df, target_col)
-    println("\n[2/4] Columna objetivo: índice $target_col_idx - '$(names(df)[target_col_idx])'")
-
-    # Split train/test
-    println("\n[3/4] Separando train/test (ratio=$train_ratio)...")
-    n = nrow(df)
-    ntrain = max(1, min(n-1, floor(Int, train_ratio * n)))
-
-    train_data = df[1:ntrain, :]
-    test_data  = df[(ntrain+1):end, :]
-
-    println("  Train: $(size(train_data))")
-    println("  Test:  $(size(test_data))")
-
-    # Crear ventanas
-    println("\n[4/4] Creando ventanas temporales...")
-    return create_windows(train_data, test_data, target_col_idx, window, horizon)
-end
-
-"""
-Carga archivos train/test separados
-"""
-function load_separate_files(
-    train_file::String,
-    test_file::String,
-    window::Int,
-    horizon::Int,
-    target_col::Union{String,Int,Nothing}
-)
-    println("\n[1/4] Leyendo archivos separados...")
-
-    # Detectar formato por extensión (si no hay extensión, tratamos como txt)
-    ext = lowercase(splitext(train_file)[2])
-
-    if ext == ".txt" || ext == ".csv" || ext == ""
-        train_df = load_txt_csv(train_file)
-        test_df  = load_txt_csv(test_file)
-    elseif ext == ".arff"
-        train_df = load_arff(train_file)
-        test_df  = load_arff(test_file)
-    elseif ext == ".ts"
-        train_df = load_ts(train_file)
-        test_df  = load_ts(test_file)
-    else
-        error("Formato no soportado: $ext")
+    try
+        df = CSV.read(
+            filepath,
+            DataFrame;
+            delim=';',
+            silencewarnings=true,
+            decimal=','
+        )
+        if nrow(df) > 0 && ncol(df) > 0
+            return df
+        end
+    catch
     end
 
-    println("  Train: $(size(train_df))")
-    println("  Test:  $(size(test_df))")
-    
-    # Validar que los datasets no estén vacíos
-    if nrow(train_df) == 0 || ncol(train_df) == 0
-        error("El archivo de entrenamiento '$train_file' está vacío o no se pudo cargar correctamente")
-    end
-    if nrow(test_df) == 0 || ncol(test_df) == 0
-        error("El archivo de test '$test_file' está vacío o no se pudo cargar correctamente")
-    end
+    try
+        content = read(filepath, String)
+        lines = split(content, '\n')
+        non_empty = filter(l -> !isempty(strip(l)), lines)
 
-    # Determinar columna objetivo
-    target_col_idx = get_target_column(train_df, target_col)
-    println("\n[2/4] Columna objetivo: índice $target_col_idx - '$(names(train_df)[target_col_idx])'")
+        if isempty(non_empty)
+            error("Archivo vacío")
+        end
 
-    # Crear ventanas
-    println("\n[3/4] Creando ventanas temporales...")
-    return create_windows(train_df, test_df, target_col_idx, window, horizon)
-end
+        first_line = strip(non_empty[1])
+        delims = [',', ';', '\t', ' ']
+        best_delim = ','
+        max_count = 0
 
-"""
-Lee archivos .txt o .csv (si no hay extensión, también entra aquí)
-"""
-function load_txt_csv(filepath::String)
-    # 1) Leer primera línea no vacía para inferir formato
-    first_line = ""
-    open(filepath, "r") do io
-        while !eof(io)
-            line = strip(readline(io))
-            if !isempty(line)
-                first_line = line
-                break
+        for d in delims
+            c = count(==(d), first_line)
+            if c > max_count
+                max_count = c
+                best_delim = d
             end
         end
-    end
-    isempty(first_line) && error("Archivo vacío: $filepath")
 
-    # 2) Inferir delimitador
-    has_comma = occursin(",", first_line)
-    has_semi  = occursin(";", first_line)
-    has_tab   = occursin("\t", first_line)
-    looks_whitespace = (!has_comma && !has_semi && !has_tab && occursin(" ", first_line))
-
-    # 3) Heurística: si la primera línea parece numérica => probablemente NO hay header
-    is_numeric_token(t) = occursin(r"^-?\d+(\.\d+)?([eE]-?\d+)?$", t)
-    toks = split(first_line)
-    numeric_ratio = isempty(toks) ? 0.0 : sum(is_numeric_token.(toks)) / length(toks)
-    no_header = numeric_ratio > 0.9
-
-    # 4) Leer con CSV.jl
-    if looks_whitespace
-        file = CSV.File(filepath;
-                        delim=' ',
-                        ignorerepeated=true,
-                        header = no_header ? false : 1)
-        df = DataFrame(file)
-    else
-        delim = has_semi ? ';' : has_tab ? '\t' : ','
-        file = CSV.File(filepath;
-                        delim=delim,
-                        header = no_header ? false : 1)
-        df = DataFrame(file)
+        df = CSV.read(
+            filepath,
+            DataFrame;
+            delim=best_delim,
+            silencewarnings=true
+        )
+        return df
+    catch
     end
 
-    # 5) Si no había header, poner nombres X1..Xd
-    if no_header
-        rename!(df, Symbol.("X" .* string.(1:ncol(df))))
+    try
+        mat, header = readdlm(filepath, ',', Float64; header=true)
+        col_names = [String(strip(String(h))) for h in header]
+        return DataFrame(mat, col_names)
+    catch
     end
 
-    # 6) Si hay timestamp tipo string en primera columna (caso electricity), quitarlo
-    if ncol(df) >= 2 && (eltype(df[!, 1]) <: Union{String, Missing})
-        df = df[:, 2:end]
-    end
-
-    # 7) Convertir a Float64 elemento a elemento (IMPORTANTE: no "rellenar" la columna entera con NaN)
-    tofloat(x) = begin
-        if x === missing
-            return NaN
-        end
-        if x isa Real
-            return Float64(x)
-        end
-        s = strip(string(x))
-        isempty(s) && return NaN
-        s = replace(s, "," => ".")
-        v = tryparse(Float64, s)
-        return v === nothing ? NaN : v
-    end
-
-    for col in names(df)
-        df[!, col] = tofloat.(df[!, col])
-    end
-
-    # Quitar columnas que sean TODO NaN/Inf (suele pasar por una columna vacía extra)
-    cols_keep = [any(isfinite, df[!, c]) for c in names(df)]
-    df = df[:, cols_keep]
-
-
-    return df
-end
-
-
-"""
-Lee archivos .arff (formato WEKA)
-PEMS-SF: Ignora la columna de labels (última columna con valores 1-7)
-"""
-function load_arff(filepath::String)
-    lines = readlines(filepath)
-
-    # Encontrar inicio de datos
-    data_start = findfirst(x -> startswith(lowercase(x), "@data"), lines)
-    if data_start === nothing
-        error("No se encontró @DATA en archivo ARFF")
-    end
-
-    # Leer datos
-    data_lines = lines[(data_start+1):end]
-    data_lines = filter(x -> !isempty(strip(x)), data_lines)
-
-    # Parsear datos
-    data_matrix = Vector{Vector{Float64}}()
-    for line in data_lines
-        values = split(strip(line), ",")
-        push!(data_matrix, parse.(Float64, values))
-    end
-
-    data_matrix = hcat(data_matrix...)'
-
-    # CASO ESPECIAL PEMS-SF: última columna son labels (1-7), las ignoramos
-    if occursin("PEMS", uppercase(filepath))
-        println("  Detectado PEMS-SF: ignorando última columna (labels)")
-        data_matrix = data_matrix[:, 1:(end-1)]
-    end
-
-    n_cols = size(data_matrix, 2)
-    col_names = ["X$i" for i in 1:n_cols]
-    df = DataFrame(data_matrix, col_names)
-
-    return df
+    return parse_custom_format(filepath)
 end
 
 """
-Lee archivos .ts (Time Series Classification format)
+Parser custom para formatos especiales.
 """
-function load_ts(filepath::String)
+function parse_custom_format(filepath::String)::DataFrame
     lines = readlines(filepath)
+    filter!(l -> !isempty(strip(l)), lines)
 
-    # Encontrar @data
-    data_start = findfirst(x -> strip(lowercase(x)) == "@data", lines)
-    if data_start === nothing
-        error("No se encontró @data en archivo .ts")
-    end
-
-    data_lines = lines[(data_start+1):end]
-    data_lines = filter(x -> !isempty(strip(x)) && !startswith(strip(x), "#"), data_lines)
-
-    # Cada línea suele ser: dim1:...,dim2:...:class
-    # Aquí hacemos una lectura simple: extraer números de la primera dimensión
     series = Vector{Vector{Float64}}()
-    for line in data_lines
-        # quitar etiqueta de clase si existe (tras el último ':')
-        parts = split(strip(line), ":")
-        # nos quedamos con todo menos el último si parece clase, pero esto depende del dataset
-        # intento robusto: extraer todos los floats de la línea
+
+    for line in lines
+        tokens = split(line, r"[,;\s]+")
         nums = Float64[]
-        for token in split(replace(line, ":" => ","), ",")
+        for token in tokens
             t = strip(token)
             isempty(t) && continue
             try
@@ -421,7 +263,6 @@ function load_ts(filepath::String)
         push!(series, nums)
     end
 
-    # Convertir a matriz (padding con NaN si longitudes distintas)
     maxlen = maximum(length.(series))
     mat = fill(NaN, length(series), maxlen)
     for (i, s) in enumerate(series)
@@ -433,10 +274,7 @@ function load_ts(filepath::String)
 end
 
 """
-Determina la columna objetivo:
-- Si target_col es Int: usa ese índice
-- Si target_col es String: busca ese nombre
-- Si es nothing: usa la última columna
+Determina la columna objetivo.
 """
 function get_target_column(df::DataFrame, target_col::Union{String,Int,Nothing})
     if target_col === nothing
@@ -459,29 +297,57 @@ end
 """
 Crea ventanas temporales (X,y) para train y test.
 
-- train_df/test_df: DataFrames completos
-- target_col_idx: índice de la columna objetivo (y)
-- window: tamaño de ventana
-- horizon: pasos adelante a predecir
+CORRECCIÓN CRÍTICA:
+- Por defecto INCLUYE los lags del objetivo en X (NO los elimina)
+- Si univariate=true, usa SOLO lags del objetivo
+- NO hay data leakage: X tiene t-window...t-1, y predice t+horizon
 """
 function create_windows(
     train_df::DataFrame,
     test_df::DataFrame,
     target_col_idx::Int,
     window::Int,
-    horizon::Int
+    horizon::Int,
+    univariate::Bool = false
 )
-    # Convertir a matriz
-    train_mat = Matrix(train_df)
-    test_mat  = Matrix(test_df)
+    # CORRECCIÓN CRÍTICA: Excluir columnas no numéricas (fechas, strings, etc.)
+    numeric_cols = Int[]
+    for i in 1:ncol(train_df)
+        col_type = eltype(train_df[!, i])
+        if col_type <: Real || col_type <: AbstractFloat || col_type <: Integer
+            push!(numeric_cols, i)
+        end
+    end
+    
+    if isempty(numeric_cols)
+        error("No hay columnas numéricas en el DataFrame")
+    end
+    
+    println("  Columnas numéricas detectadas: $(length(numeric_cols)) de $(ncol(train_df))")
+    
+    # Convertir solo columnas numéricas a Matrix{Float64}
+    train_mat = Matrix{Float64}(train_df[:, numeric_cols])
+    test_mat  = Matrix{Float64}(test_df[:, numeric_cols])
+    
+    # Ajustar target_col_idx al nuevo espacio de índices
+    target_col_idx_adjusted = findfirst(==(target_col_idx), numeric_cols)
+    if target_col_idx_adjusted === nothing
+        error("La columna objetivo (índice $target_col_idx) no es numérica")
+    end
 
-    # Features = todas menos la target
-    feature_idx = collect(1:size(train_mat, 2))
-    deleteat!(feature_idx, findfirst(==(target_col_idx), feature_idx))
+    # CORRECCIÓN: INCLUIR lags del objetivo
+    if univariate
+        # Solo autoregresivo (lags del objetivo)
+        feature_idx = [target_col_idx_adjusted]
+        println("  Modo: UNIVARIATE (solo lags del objetivo)")
+    else
+        # Todas las columnas numéricas (incluyendo lags del objetivo)
+        feature_idx = collect(1:size(train_mat, 2))
+        println("  Modo: MULTIVARIATE (todas las columnas numéricas, incluyendo lags del objetivo)")
+    end
 
-    # Construir (X,y)
-    Xtr, ytr = build_xy(train_mat, feature_idx, target_col_idx, window, horizon)
-    Xte, yte = build_xy(test_mat, feature_idx, target_col_idx, window, horizon)
+    Xtr, ytr = build_xy(train_mat, feature_idx, target_col_idx_adjusted, window, horizon)
+    Xte, yte = build_xy(test_mat, feature_idx, target_col_idx_adjusted, window, horizon)
 
     println("  Xtr: $(size(Xtr))  ytr: $(size(ytr))")
     println("  Xte: $(size(Xte))  yte: $(size(yte))")
@@ -491,8 +357,9 @@ end
 
 """
 Construye pares (X,y) para una matriz:
-- X: (n_samples, window * n_features)
-- y: (n_samples,)
+- X: (n_samples, window * n_features) con lags t-window...t-1
+- y: (n_samples,) con valores en t+horizon
+- NO hay data leakage porque y está en el futuro respecto a X
 """
 function build_xy(
     data::Matrix{Float64},
@@ -513,8 +380,11 @@ function build_xy(
     y = Vector{Float64}(undef, nsamples)
 
     for i in 1:nsamples
+        # X: ventana de t-window a t-1
         win = data[i:(i+window-1), feature_idx]
-        X[i, :] = vec(win')  # flatten (features primero)
+        X[i, :] = vec(win')
+        
+        # y: valor objetivo en t+horizon-1 (futuro)
         y[i] = data[i + window + horizon - 1, target_idx]
     end
 
