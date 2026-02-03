@@ -7,52 +7,230 @@ using DelimitedFiles
 
 include("load_data_multi.jl")
 
-# Definir la estructura DoMEParams
 struct DoMEParams
     max_nodes::Int
-    strategy::Symbol
     min_improvement::Float64
+    use_division::Bool
+    strategy::Function
 end
 
-# Intentar importar las funciones de estrategia desde SymDoME
-STRATEGY_FUNCTIONS = Dict{Symbol, Any}()
+"""
+Configuraciones de modelos según especificación de los profesores.
 
-try
-    STRATEGY_FUNCTIONS[:selective] = SymDoME.selectiveStrategy
-    println("[OK] Estrategia 'selective' cargada desde SymDoME")
-catch
-    println("[INFO] No se encontró SymDoME.selectiveStrategy")
+minimumReductionMSE es un MULTIPLICADOR del MSE actual, NO un valor absoluto.
+Línea 775 de DoME.jl: maximumReduction = obj.minimumReductionMSE * obj.mse
+Con MSE normalizado ~0.01-0.05 y minimumReductionMSE=0.001:
+  → maximumReduction = 0.001 * 0.01 = 0.00001 (demasiado pequeño)
+SOLUCIÓN: Usar valores MUCHO más pequeños: 1e-5 a 1e-9
+"""
+function modelConfigurations(model::Symbol)
+    if model == :DoME
+        MinimumReductionsMSE = [1e-5, 1e-6, 1e-7, 1e-8, 1e-9]
+
+        # CORRECCIÓN: maxNodes=1 eliminado. Un árbol de 1 nodo es solo mean(y),
+        # Step! retorna false inmediatamente → experimento inútil.
+        MaxNumNodes = [5, 10, 20, 30, 50, 75, 100, 150, 200]
+
+        Strategies = [
+            SymDoME.Strategy4,  # Más rápida
+            SymDoME.Strategy3   # Default
+        ]
+
+        configurations = [
+            Dict{String,Any}(
+                "minimumReductionMSE" => minimumReductionMSE,
+                "maxNumNodes" => maxNumNodes,
+                "useDivisionOperator" => useDivisionOperator,
+                "strategy" => strategy,
+                "strategyName" => string(strategy)
+            )
+            for maxNumNodes in MaxNumNodes,
+                minimumReductionMSE in MinimumReductionsMSE,
+                useDivisionOperator in [false, true],
+                strategy in Strategies
+        ][:]
+    else
+        error("Modelo no soportado: $model")
+    end
+    return configurations
 end
 
-try
-    STRATEGY_FUNCTIONS[:exhaustive] = SymDoME.exhaustiveStrategy
-    println("[OK] Estrategia 'exhaustive' cargada desde SymDoME")
-catch
-    println("[INFO] No se encontró SymDoME.exhaustiveStrategy")
+# =============================================================================
+# CORRECCIÓN: Imputación de NaN/Inf
+# Los scripts de test (test_go_no_go, test_datasets) hacían esto antes de
+# normalizar, pero run_experiment() no lo hacía. DoME hace @assert(!any(isnan))
+# en el constructor → cualquier dato sucio crasheaba en CESGA.
+# =============================================================================
+
+function impute_nonfinite!(X::Matrix{Float64})
+    n, d = size(X)
+    for j in 1:d
+        s = 0.0; c = 0
+        @inbounds for i in 1:n
+            v = X[i, j]
+            if isfinite(v)
+                s += v; c += 1
+            end
+        end
+        μ = (c > 0) ? (s / c) : 0.0
+        @inbounds for i in 1:n
+            if !isfinite(X[i, j])
+                X[i, j] = μ
+            end
+        end
+    end
+    return X
 end
 
-# Función para obtener la estrategia
-function get_strategy_function(strategy_symbol::Symbol)
-    return get(STRATEGY_FUNCTIONS, strategy_symbol, nothing)
+function impute_nonfinite!(y::Vector{Float64})
+    s = 0.0; c = 0
+    @inbounds for v in y
+        if isfinite(v)
+            s += v; c += 1
+        end
+    end
+    μ = (c > 0) ? (s / c) : 0.0
+    @inbounds for i in eachindex(y)
+        if !isfinite(y[i])
+            y[i] = μ
+        end
+    end
+    return y
 end
 
+"""
+FUNCIÓN DE ENTRENAMIENTO - API con Step! manual para capturar history.
+
+dome() no devuelve history. El struct DoME existe pero no se exporta.
+Solución: Usar SymDoME.DoME (struct interno) y Step! para iterar manualmente.
+"""
+function train_dome(
+    Xtr::Matrix{Float64},
+    ytr::Vector{Float64},
+    params::DoMEParams
+)
+    println("\n[TRAIN] Entrenando DoME...")
+    println("  Parámetros:")
+    println("    - max_nodes: $(params.max_nodes)")
+    println("    - min_improvement: $(params.min_improvement)")
+    println("    - use_division: $(params.use_division)")
+    println("    - strategy: $(params.strategy)")
+    println("  Datos:")
+    println("    - Xtr: $(size(Xtr))")
+    println("    - ytr: $(size(ytr))")
+
+    dome_obj = SymDoME.DoME(
+        Xtr, ytr;
+        maximumNodes=params.max_nodes,
+        minimumReductionMSE=params.min_improvement,
+        useDivisionOperator=params.use_division,
+        strategy=params.strategy
+    )
+
+    history = Float64[dome_obj.mse]
+
+    max_iterations = 1000  # Límite de seguridad
+
+    for iteration in 1:max_iterations
+        improved = SymDoME.Step!(dome_obj)
+        push!(history, dome_obj.mse)
+
+        if !improved
+            println("  Convergencia alcanzada en iteración $iteration")
+            break
+        end
+    end
+
+    tree = dome_obj.tree
+
+    println("  Entrenamiento completado")
+    println("    - MSE inicial: $(history[1])")
+    println("    - MSE final: $(history[end])")
+    println("    - Iteraciones: $(length(history))")
+    println("    - Mejora: $(round((1 - history[end]/history[1])*100, digits=2))%")
+
+    return tree, history
+end
+
+"""
+FUNCIÓN DE EVALUACIÓN - vectorizada.
+
+CORRECCIÓN: La versión anterior hacía un bucle fila por fila:
+    for i in eachindex(ŷ_test)
+        ŷ_test[i] = SymDoME.evaluateTree(tree, Xte[i, :])
+    end
+Cada iteración hacía reshape(vector, 1, :) → asignación extra.
+Con 4343 muestras × 2400 experimentos eso es mucho.
+
+evaluateTree(tree::Tree, dataset::Matrix) existe (Tree.jl línea 476) y
+recompute desde los hijos usando el dataset pasado, sin usar semantics
+de entrenamiento. Es seguro y vectorizado.
+"""
+function evaluate_dome(
+    tree,
+    Xte::Matrix{Float64},
+    yte::Vector{Float64}
+)
+    println("\n[EVAL] Evaluando en conjunto de test...")
+    println("  Datos test: $(size(Xte))")
+
+    # Evaluación vectorizada: pasa toda la matriz de una vez
+    ŷ_test = collect(SymDoME.evaluateTree(tree, Xte))
+
+    mse_test = mean((ŷ_test .- yte).^2)
+
+    println("  MSE test: $mse_test")
+
+    return ŷ_test, mse_test
+end
+
+"""
+FUNCIÓN PRINCIPAL DE EXPERIMENTO
+"""
 function run_experiment(;
     dataset::String,
-    data_dir::String = "data",
     window::Int,
-    horizon::Int = 1,
-    max_nodes::Int = 15,
-    strategy::Symbol = :selective,
-    min_improvement::Float64 = 1e-6,
+    normalization::String = "MaxMin",
+    model::Symbol = :DoME,
+    config_id::Int,
     seed::Int = 1,
-    exp_id::String = "exp",
+    data_dir::String = "data",
+    horizon::Int = 1,
     target_col::Union{String,Int,Nothing} = nothing,
     train_ratio::Float64 = 0.75
 )
+    # 1. Obtener configuración del modelo
+    configurations = modelConfigurations(model)
 
-    # Cargar el dataset
+    if config_id < 1 || config_id > length(configurations)
+        error("config_id fuera de rango: $config_id (total: $(length(configurations)))")
+    end
+
+    config = configurations[config_id]
+    max_nodes = config["maxNumNodes"]
+    min_improvement = config["minimumReductionMSE"]
+    use_division = config["useDivisionOperator"]
+    strategy = config["strategy"]
+
+    println("="^70)
+    println("EJECUTANDO EXPERIMENTO")
+    println("="^70)
+    println("Dataset: $dataset")
+    println("Window: $window")
+    println("Normalización: $normalization")
+    println("Modelo: $model")
+    println("Config ID: $config_id")
+    println("Seed: $seed")
+    println("\nConfiguración del modelo:")
+    println("  - maxNumNodes: $max_nodes")
+    println("  - minimumReductionMSE: $min_improvement")
+    println("  - useDivisionOperator: $use_division")
+    println("  - strategy: $strategy")
+    println("="^70)
+
+    # 2. Cargar datos
     Xtr, ytr, Xte, yte = load_dataset(
-        dataset,
+        dataset;
         data_dir=data_dir,
         window=window,
         horizon=horizon,
@@ -60,207 +238,174 @@ function run_experiment(;
         train_ratio=train_ratio
     )
 
-    println("\n[DATA] Datos cargados: Xtr=$(size(Xtr)), ytr=$(size(ytr)), Xte=$(size(Xte)), yte=$(size(yte))")
-    println("   Tipos: Xtr=$(eltype(Xtr)), ytr=$(eltype(ytr))")
+    println("\nDatos cargados:")
+    println("  Xtr: $(size(Xtr))")
+    println("  ytr: $(size(ytr))")
+    println("  Xte: $(size(Xte))")
+    println("  yte: $(size(yte))")
 
-    # Crear los parámetros del modelo DoME
-    params = DoMEParams(max_nodes, strategy, min_improvement)
+    # 3. CORRECCIÓN: Imputar NaN/Inf ANTES de normalizar
+    println("\nImputando valores no finitos...")
+    impute_nonfinite!(Xtr)
+    impute_nonfinite!(ytr)
+    impute_nonfinite!(Xte)
+    impute_nonfinite!(yte)
+    println("  Imputación completada")
 
-    println("\n[SETUP] Entrenando DoME con parámetros: ", params)
+    # 4. Normalizar
+    println("\nNormalizando datos...")
+    if normalization == "MaxMin"
+        X_min = minimum(Xtr, dims=1)
+        X_max = maximum(Xtr, dims=1)
+        X_range = X_max .- X_min
+        X_range[X_range .== 0] .= 1.0
 
-    # Intentar obtener la función de estrategia
-    strategy_fn = get_strategy_function(strategy)
-    
-    # Preparar los kwargs para dome()
-    dome_kwargs = Dict{Symbol, Any}(
-        :maximumNodes => params.max_nodes,
-        :minimumReductionMSE => params.min_improvement
-    )
-    
-    # Solo añadir strategy si encontramos la función
-    if strategy_fn !== nothing
-        dome_kwargs[:strategy] = strategy_fn
-        println("   Usando función de estrategia: $strategy")
-    else
-        println("   [INFO] Función de estrategia no encontrada, usando configuración por defecto")
-    end
+        Xtr_norm = (Xtr .- X_min) ./ X_range
+        Xte_norm = (Xte .- X_min) ./ X_range
 
-    # Ejecutar el algoritmo DoME
-    tree = nothing
-    history = nothing
-    
-    try
-        tree, history = dome(Xtr, ytr; dome_kwargs...)
-        println("\n[SUCCESS] Entrenamiento completado. MSE final: ", history[end])
-    catch e
-        println("\n[WARNING] Error durante el entrenamiento:")
-        println("   Tipo: ", typeof(e))
-        println("   Mensaje: ", e)
-        
-        # Intentar sin el parámetro strategy
-        println("\n   Reintentando sin especificar estrategia...")
-        tree, history = dome(
-            Xtr, 
-            ytr;
-            maximumNodes=params.max_nodes,
-            minimumReductionMSE=params.min_improvement
-        )
-        println("[SUCCESS] Entrenamiento completado (sin estrategia). MSE final: ", history[end])
-    end
-
-    # Evaluación en el conjunto de prueba
-    println("\n[TEST] Evaluando en conjunto de test...")
-    ŷ_test = zeros(size(Xte, 1))
-    
-    for i in eachindex(ŷ_test)
-        ŷ_test[i] = SymDoME.evaluateTree(tree, Xte[i, :])
-    end
-    
-    mse_test = mean((ŷ_test .- yte).^2)
-
-    println("   MSE en test: ", mse_test)
-
-    timestamp = Dates.format(now(), "yyyy-mm-dd_HHMMSS")
-
-    # ===== Guardado en CSV (resumen del experimento) =====
-    mkpath("results")
-
-    csv_file = "results/$exp_id.csv"
-
-    # Crear DataFrame con los resultados
-    df = DataFrame(
-        dataset = dataset,
-        window = window,
-        horizon = horizon,
-        max_nodes = max_nodes,
-        strategy = String(strategy),
-        min_improvement = min_improvement,
-        seed = seed,
-        train_mse_final = history[end],
-        test_mse = mse_test,
-        num_nodes = length(history),
-        timestamp = timestamp
-    )
-
-    # Guardar CSV
-    CSV.write(csv_file, df)
-
-    # ===== Guardado en TXT (información detallada) =====
-    txt_file = "results/$exp_id.txt"
-    
-    open(txt_file, "w") do io
-        println(io, "="^60)
-        println(io, "RESULTADOS DEL EXPERIMENTO: $exp_id")
-        println(io, "="^60)
-        println(io, "Timestamp: $timestamp")
-        println(io, "")
-        
-        println(io, "CONFIGURACIÓN:")
-        println(io, "-"^60)
-        println(io, "Dataset: $dataset")
-        println(io, "Target column: $target_col")
-        println(io, "Window: $window")
-        println(io, "Horizon: $horizon")
-        println(io, "Max nodes: $max_nodes")
-        println(io, "Strategy: $strategy")
-        println(io, "Min improvement: $min_improvement")
-        println(io, "Seed: $seed")
-        println(io, "")
-        
-        println(io, "DIMENSIONES DE LOS DATOS:")
-        println(io, "-"^60)
-        println(io, "Train: X=$(size(Xtr)), y=$(size(ytr))")
-        println(io, "Test:  X=$(size(Xte)), y=$(size(yte))")
-        println(io, "")
-        
-        println(io, "RESULTADOS:")
-        println(io, "-"^60)
-        println(io, "MSE entrenamiento (final): $(history[end])")
-        println(io, "MSE test: $mse_test")
-        println(io, "Número de nodos: $(length(history))")
-        println(io, "")
-        
-        println(io, "HISTORIAL DE ENTRENAMIENTO:")
-        println(io, "-"^60)
-        println(io, "Iteración\tMSE")
-        for (i, mse) in enumerate(history)
-            println(io, "$i\t$mse")
+        y_min = minimum(ytr)
+        y_max = maximum(ytr)
+        y_range = y_max - y_min
+        if y_range == 0
+            y_range = 1.0
         end
-        println(io, "")
-        
-        println(io, "EXPRESIÓN MATEMÁTICA:")
-        println(io, "-"^60)
-        println(io, string(tree))
-        println(io, "")
-        
-        println(io, "ÁRBOL DEL MODELO (representación interna):")
-        println(io, "-"^60)
-        println(io, tree)
-        println(io, "")
-        
-        println(io, "="^60)
-        println(io, "FIN DEL REPORTE")
-        println(io, "="^60)
+
+        ytr_norm = (ytr .- y_min) ./ y_range
+        yte_norm = (yte .- y_min) ./ y_range
+    else
+        error("Normalización no soportada: $normalization")
     end
 
-    # ===== Guardar predicciones en CSV =====
-    predictions_file = "results/$(exp_id)_predictions.csv"
-    
-    predictions_df = DataFrame(
-        y_true = yte,
+    println("  Datos normalizados")
+
+    # 5. Crear parámetros del modelo
+    params = DoMEParams(max_nodes, min_improvement, use_division, strategy)
+
+    # 6. ENTRENAR
+    tree, history = train_dome(Xtr_norm, ytr_norm, params)
+
+    # 7. EVALUAR
+    ŷ_test, mse_test = evaluate_dome(tree, Xte_norm, yte_norm)
+
+    # 8. Guardar resultados
+    results_dir = "results"
+    isdir(results_dir) || mkdir(results_dir)
+
+    dataset_name = replace(split(dataset, "/")[end], ".csv" => "", ".txt" => "")
+    base_name = "$(dataset_name)_$(normalization)_$(model)_w$(window)_config$(config_id)_seed$(seed)"
+
+    # CSV resumen
+    csv_file = joinpath(results_dir, "$(base_name).csv")
+    results_df = DataFrame(
+        dataset = [dataset],
+        window = [window],
+        normalization = [normalization],
+        model = [string(model)],
+        config_id = [config_id],
+        seed = [seed],
+        max_nodes = [max_nodes],
+        min_improvement = [min_improvement],
+        use_division = [use_division],
+        strategy = [string(strategy)],
+        mse_initial = [history[1]],
+        mse_final_train = [history[end]],
+        mse_test = [mse_test],
+        improvement_pct = [(1 - history[end]/history[1]) * 100],
+        iterations = [length(history)],
+        converged = [length(history) > 1],
+        error = [""]  # CORRECCIÓN: columna error presente siempre (vacía si no hay error)
+    )
+    CSV.write(csv_file, results_df)
+    println("\n[RESULTADOS] Guardado resumen en: $csv_file")
+
+    # TXT reporte
+    txt_file = joinpath(results_dir, "$(base_name).txt")
+    open(txt_file, "w") do io
+        println(io, "="^70)
+        println(io, "REPORTE DE EXPERIMENTO")
+        println(io, "="^70)
+        println(io, "Fecha: $(Dates.now())")
+        println(io, "\nDATASET:")
+        println(io, "  - Nombre: $dataset")
+        println(io, "  - Window: $window")
+        println(io, "  - Normalización: $normalization")
+        println(io, "  - Train ratio: $train_ratio")
+        println(io, "\nMODELO:")
+        println(io, "  - Tipo: $model")
+        println(io, "  - Config ID: $config_id")
+        println(io, "  - Seed: $seed")
+        println(io, "\nHIPERPARÁMETROS:")
+        println(io, "  - maxNumNodes: $max_nodes")
+        println(io, "  - minimumReductionMSE: $min_improvement")
+        println(io, "  - useDivisionOperator: $use_division")
+        println(io, "  - strategy: $strategy")
+        println(io, "\nDIMENSIONES:")
+        println(io, "  - Xtr: $(size(Xtr))")
+        println(io, "  - ytr: $(size(ytr))")
+        println(io, "  - Xte: $(size(Xte))")
+        println(io, "  - yte: $(size(yte))")
+        println(io, "\nRESULTADOS:")
+        println(io, "  - MSE inicial: $(history[1])")
+        println(io, "  - MSE final (train): $(history[end])")
+        println(io, "  - MSE test: $mse_test")
+        println(io, "  - Mejora: $((1 - history[end]/history[1]) * 100)%")
+        println(io, "  - Iteraciones: $(length(history))")
+        println(io, "  - Convergencia: $(length(history) > 1 ? "SÍ" : "NO")")
+        println(io, "\nHISTORIAL DE ENTRENAMIENTO:")
+        for (i, mse) in enumerate(history)
+            println(io, "  Iter $i: MSE = $mse")
+        end
+        println(io, "\nEXPRESIÓN MATEMÁTICA:")
+        try
+            expr = SymDoME.vectorString(tree)
+            println(io, "  $expr")
+        catch e
+            println(io, "  [Error al obtener expresión: $e]")
+        end
+        println(io, "="^70)
+    end
+    println("[RESULTADOS] Guardado reporte en: $txt_file")
+
+    # CSV predicciones
+    pred_file = joinpath(results_dir, "$(base_name)_predictions.csv")
+    pred_df = DataFrame(
+        y_true = yte_norm,
         y_pred = ŷ_test,
-        error = yte .- ŷ_test,
-        squared_error = (yte .- ŷ_test).^2
+        error = ŷ_test .- yte_norm,
+        abs_error = abs.(ŷ_test .- yte_norm),
+        squared_error = (ŷ_test .- yte_norm).^2
     )
-    
-    CSV.write(predictions_file, predictions_df)
+    CSV.write(pred_file, pred_df)
+    println("[RESULTADOS] Guardado predicciones en: $pred_file")
 
-    println("\n[RESULTS] Resultados guardados en:")
-    println("  - Resumen CSV: $csv_file")
-    println("  - Reporte detallado TXT: $txt_file")
-    println("  - Predicciones CSV: $predictions_file")
+    println("\n" * "="^70)
+    println("EXPERIMENTO COMPLETADO")
+    println("="^70)
 
-    # Retornar diccionario con resultados
-    result = Dict(
-        "dataset" => dataset,
-        "window" => window,
-        "horizon" => horizon,
-        "max_nodes" => max_nodes,
-        "strategy" => strategy,
-        "min_improvement" => min_improvement,
-        "seed" => seed,
-        "tree" => tree,
-        "history" => history,
-        "train_mse_final" => history[end],
-        "test_mse" => mse_test,
-        "predictions" => ŷ_test,
-        "y_true" => yte
-    )
-
-    return result
+    return results_df, tree, history
 end
 
-# ==========================================
-# Ejecución directa del script
-# ==========================================
+# Script ejecutable
 if abspath(PROGRAM_FILE) == @__FILE__
-    println("="^60)
-    println("Ejecutando experimento DoME")
-    println("="^60)
+    if length(ARGS) < 6
+        println("Uso: julia run_experiment_multi.jl <dataset> <window> <norm> <model> <config_id> <seed>")
+        println("Ejemplo: julia run_experiment_multi.jl ETT/ETTh2.csv 12 MaxMin DoME 1 1")
+        exit(1)
+    end
+
+    dataset = ARGS[1]
+    window = parse(Int, ARGS[2])
+    normalization = ARGS[3]
+    model = Symbol(ARGS[4])
+    config_id = parse(Int, ARGS[5])
+    seed = parse(Int, ARGS[6])
 
     run_experiment(
-        dataset = "ElectricDevices/LD2011_2014.txt",
-        target_col = "MT_196",
-        window = 24,
-        horizon = 1,
-        max_nodes = 15,
-        strategy = :selective,
-        min_improvement = 1e-6,
-        seed = 1,
-        exp_id = "exp_1" 
+        dataset=dataset,
+        window=window,
+        normalization=normalization,
+        model=model,
+        config_id=config_id,
+        seed=seed
     )
-
-    println("\n" * "="^60)
-    println("Experimento terminado")
-    println("="^60)
 end
