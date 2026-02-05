@@ -13,12 +13,19 @@ catch
     Missings.nonmissingtype(T)
 end
 
+# Heurística: si al parsear sale 1 sola columna y su nombre contiene comas,
+# normalmente es que se ha usado un delimitador incorrecto (p.ej. ';' en un CSV con ',').
+function _looks_like_wrong_delim(df::DataFrame)::Bool
+    return (ncol(df) == 1) && (length(names(df)) == 1) && occursin(",", String(names(df)[1]))
+end
+
 """
 Lee un archivo CSV/TXT de forma robusta:
 - intenta CSV.read estándar
 - intenta ';' con decimal ','
 - autodetecta delimitador por la primera línea
-- fallback a readdlm/parse custom
+- fallback readdlm
+- fallback parse custom numérico
 """
 function safe_read_file(filepath::String; verbose::Bool=true)::DataFrame
     ext = lowercase(splitext(filepath)[2])
@@ -27,7 +34,7 @@ function safe_read_file(filepath::String; verbose::Bool=true)::DataFrame
     if ext == ".csv"
         try
             df = CSV.read(filepath, DataFrame; silencewarnings=true, ignorerepeated=true)
-            if nrow(df) > 0 && ncol(df) > 0
+            if nrow(df) > 0 && ncol(df) > 0 && !_looks_like_wrong_delim(df)
                 return df
             end
         catch
@@ -37,20 +44,26 @@ function safe_read_file(filepath::String; verbose::Bool=true)::DataFrame
     # 2) CSV estilo europeo
     try
         df = CSV.read(filepath, DataFrame; delim=';', decimal=',', silencewarnings=true, ignorerepeated=true)
-        if nrow(df) > 0 && ncol(df) > 0
+        if nrow(df) > 0 && ncol(df) > 0 && !_looks_like_wrong_delim(df)
             return df
         end
     catch
     end
 
-    # 3) Autodetección por primera línea
+    # 3) Autodetección por primera línea (sin cargar todo el fichero en memoria)
     try
-        content = read(filepath, String)
-        lines = split(content, '\n')
-        non_empty = filter(l -> !isempty(strip(l)), lines)
-        isempty(non_empty) && error("Archivo vacío")
+        first_line = ""
+        open(filepath, "r") do io
+            while !eof(io)
+                l = strip(readline(io))
+                if !isempty(l)
+                    first_line = l
+                    break
+                end
+            end
+        end
+        isempty(first_line) && error("Archivo vacío")
 
-        first_line = strip(non_empty[1])
         delims = [',', ';', '\t', ' ']
         best_delim = ','
         max_count = -1
@@ -64,7 +77,11 @@ function safe_read_file(filepath::String; verbose::Bool=true)::DataFrame
         end
 
         df = CSV.read(filepath, DataFrame; delim=best_delim, silencewarnings=true, ignorerepeated=true)
-        return df
+        if nrow(df) > 0 && ncol(df) > 0 && !_looks_like_wrong_delim(df)
+            return df
+        else
+            error("Autodetección de delimitador fallida")
+        end
     catch
     end
 
@@ -308,46 +325,35 @@ function load_dataset(
         end
 
         train_df = safe_read_file(train_file; verbose=verbose)
-        test_df  = safe_read_file(test_file;  verbose=verbose)
-
-        verbose && begin
-            println("  Train: $(size(train_df))")
-            println("  Test:  $(size(test_df))")
-        end
+        test_df  = safe_read_file(test_file; verbose=verbose)
 
     elseif single_file !== nothing
         verbose && begin
             println("Formato: Archivo único")
             println("  Archivo: $single_file")
-            println("\n[1/4] Leyendo archivo único...")
+            println("\n[1/4] Leyendo archivo...")
         end
 
-        full_df = safe_read_file(single_file; verbose=verbose)
-        verbose && println("  Dataset: $(size(full_df))")
+        df = safe_read_file(single_file; verbose=verbose)
 
-        n = nrow(full_df)
-        split_idx = Int(floor(n * train_ratio))
-        split_idx = max(1, min(split_idx, n-1))
+        # split train/test por ratio
+        n = nrow(df)
+        ntrain = max(1, floor(Int, train_ratio * n))
+        ntrain = min(ntrain, n-1)  # asegurar al menos 1 en test
 
-        verbose && println("\n[2/4] Separando train/test (ratio=$train_ratio)...")
-        train_df = full_df[1:split_idx, :]
-        test_df  = full_df[(split_idx+1):end, :]
+        train_df = df[1:ntrain, :]
+        test_df  = df[(ntrain+1):n, :]
 
-        verbose && begin
-            println("  Train: $(size(train_df))")
-            println("  Test:  $(size(test_df))")
-        end
+        verbose && println("  Split: train=$(nrow(train_df))  test=$(nrow(test_df))")
+
     else
-        error("No se encontraron archivos válidos para '$dataset_name' en '$base_dir'")
+        error("No se encontró el dataset: $dataset_name en $data_dir")
     end
 
-    step_offset = (train_file !== nothing && test_file !== nothing) ? 2 : 3
+    verbose && println("\n[2/4] Determinando columna objetivo...")
     target_col_idx = get_target_column(train_df, target_col)
-    target_col_name = names(train_df)[target_col_idx]
 
-    verbose && println("\n[$step_offset/4] Columna objetivo: índice $target_col_idx - '$target_col_name'")
-
-    verbose && println("\n[$(step_offset+1)/4] Creando ventanas temporales...")
+    verbose && println("\n[3/4] Creando ventanas (window=$window, horizon=$horizon)...")
     Xtr, ytr, Xte, yte = create_windows(
         train_df, test_df, target_col_idx, window, horizon, univariate;
         verbose=verbose
