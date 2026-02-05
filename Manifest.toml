@@ -2,7 +2,7 @@
 
 julia_version = "1.11.0-rc3"
 manifest_format = "2.0"
-project_hash = "306ae59af900250b704886d86efd2410465d635b"
+project_hash = "312df6965fc9fe11978c5aaa3f1ff80774a421a4"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -105,6 +105,23 @@ weakdeps = ["SparseArrays"]
 
     [deps.ChainRulesCore.extensions]
     ChainRulesCoreSparseArraysExt = "SparseArrays"
+
+[[deps.ChunkCodecCore]]
+git-tree-sha1 = "1a3ad7e16a321667698a19e77362b35a1e94c544"
+uuid = "0b6fb165-00bc-4d37-ab8b-79f91016dbe1"
+version = "1.0.1"
+
+[[deps.ChunkCodecLibZlib]]
+deps = ["ChunkCodecCore", "Zlib_jll"]
+git-tree-sha1 = "cee8104904c53d39eb94fd06cbe60cb5acde7177"
+uuid = "4c0bbee4-addc-4d73-81a0-b6caacae83c8"
+version = "1.0.0"
+
+[[deps.ChunkCodecLibZstd]]
+deps = ["ChunkCodecCore", "Zstd_jll"]
+git-tree-sha1 = "34d9873079e4cb3d0c62926a225136824677073f"
+uuid = "55437552-ac27-4d47-9aa3-63184e8fd398"
+version = "1.0.0"
 
 [[deps.Clustering]]
 deps = ["Distances", "LinearAlgebra", "NearestNeighbors", "Printf", "Random", "SparseArrays", "Statistics", "StatsBase"]
@@ -298,6 +315,16 @@ git-tree-sha1 = "65e55303b72f4a567a51b174dd2c47496efeb95a"
 uuid = "b86e33f2-c0db-4aa1-a6e0-ab43e668529e"
 version = "0.3.1"
 
+[[deps.FileIO]]
+deps = ["Pkg", "Requires", "UUIDs"]
+git-tree-sha1 = "6522cfb3b8fe97bec632252263057996cbd3de20"
+uuid = "5789e2e9-d7fb-5bc7-8068-2c6fae9b9549"
+version = "1.18.0"
+weakdeps = ["HTTP"]
+
+    [deps.FileIO.extensions]
+    HTTPExt = "HTTP"
+
 [[deps.FilePathsBase]]
 deps = ["Compat", "Dates"]
 git-tree-sha1 = "3bab2c5aa25e7840a4b065805c0cdfc01f3068d2"
@@ -425,6 +452,11 @@ git-tree-sha1 = "f923f9a774fcf3f5cb761bfa43aeadd689714813"
 uuid = "2e76f6c2-a576-52d4-95c1-20adfe4de566"
 version = "8.5.1+0"
 
+[[deps.HashArrayMappedTries]]
+git-tree-sha1 = "2eaa69a7cab70a52b9687c8bf950a5a93ec895ae"
+uuid = "076d061b-32b6-4027-95e0-9a2c6f6d7e74"
+version = "0.2.0"
+
 [[deps.HypergeometricFunctions]]
 deps = ["LinearAlgebra", "OpenLibm_jll", "SpecialFunctions"]
 git-tree-sha1 = "68c173f4f449de5b438ee67ed0c9c748dc31a2ec"
@@ -482,6 +514,18 @@ version = "0.2.6"
 git-tree-sha1 = "a3f24677c21f5bbe9d2a714f95dcd58337fb2856"
 uuid = "82899510-4779-5014-852e-03e436cf321d"
 version = "1.0.0"
+
+[[deps.JLD2]]
+deps = ["ChunkCodecLibZlib", "ChunkCodecLibZstd", "FileIO", "MacroTools", "Mmap", "OrderedCollections", "PrecompileTools", "ScopedValues"]
+git-tree-sha1 = "8f8ff711442d1f4cfc0d86133e7ee03d62ec9b98"
+uuid = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+version = "0.6.3"
+
+    [deps.JLD2.extensions]
+    UnPackExt = "UnPack"
+
+    [deps.JLD2.weakdeps]
+    UnPack = "3a884ed6-31ef-47d7-9d2a-63182c4928ed"
 
 [[deps.JLFzf]]
 deps = ["REPL", "Random", "fzf_jll"]
@@ -1002,6 +1046,12 @@ version = "0.5.1+0"
 [[deps.SHA]]
 uuid = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 version = "0.7.0"
+
+[[deps.ScopedValues]]
+deps = ["HashArrayMappedTries", "Logging"]
+git-tree-sha1 = "c3b2323466378a2ba15bea4b2f73b081e022f473"
+uuid = "7e506255-f358-4e82-b7e4-beb19740aa63"
+version = "1.5.0"
 
 [[deps.Scratch]]
 deps = ["Dates"]
