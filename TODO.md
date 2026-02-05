@@ -119,3 +119,10 @@ Tengo que:
 
 05/02/2025
 
+Tengo que :
+
+- comprobar que todo funciona correctamente y está listo para mandar al CESGA (done)
+
+- mandar al cesga los experimentos ejecutando con un solo dataset (done)
+
+Preguntar qué debo tener exactamente en el script del CESGA, es decir, qué parámetros
