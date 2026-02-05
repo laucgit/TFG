@@ -158,8 +158,8 @@ function run_experiment(;
     target_col::Union{String,Int,Nothing}=nothing,
     train_ratio::Float64=0.75,
     save_detailed::Bool=true,
-    save_predictions::Bool=false,              # <- compatible con tu sweep
-    predictions_dir::Union{Nothing,String}=nothing,  # <- se ignora aquí (I/O lo hace el sweep)
+    save_predictions::Bool=false,              # compatible con tu sweep
+    predictions_dir::Union{Nothing,String}=nothing,  # se ignora aquí (I/O lo hace el sweep)
     max_iterations::Int=1000,
     verbose::Bool=true
 )
@@ -179,6 +179,8 @@ function run_experiment(;
         println("dataset=$dataset window=$window norm=$normalization model=$model config_id=$config_id seed=$seed")
         println("max_nodes=$(params.max_nodes) min_impr=$(params.min_improvement) div=$(params.use_division) strat=$strategy_name")
     end
+
+    total_t0 = time()
 
     Xtr, ytr, Xte, yte = load_dataset(
         dataset;
@@ -217,8 +219,10 @@ function run_experiment(;
     ytr_norm = (ytr .- y_min) ./ y_rng
     yte_norm = (yte .- y_min) ./ y_rng
 
-    # Train
+    # Train (timing)
+    train_t0 = time()
     tree, history, stop_reason = train_dome(Xtr_norm, ytr_norm, params; max_iterations=max_iterations, verbose=verbose)
+    train_time_sec = time() - train_t0
 
     iterations_real = length(history) - 1
     hit_max_iterations = (stop_reason == "max_iterations")
@@ -234,6 +238,8 @@ function run_experiment(;
     mse_initial = history[1]
     mse_final_train = history[end]
     improvement_pct = (mse_initial == 0.0) ? 0.0 : (1 - mse_final_train / mse_initial) * 100
+
+    total_time_sec = time() - total_t0
 
     dataset_name = replace(split(dataset, "/")[end], ".csv" => "", ".txt" => "")
     ts = Dates.now()
@@ -262,6 +268,9 @@ function run_experiment(;
         converged=[converged],
         hit_max_iterations=[hit_max_iterations],
         stop_reason=[stop_reason],
+
+        train_time_sec=[train_time_sec],
+        total_time_sec=[total_time_sec],
 
         train_samples=[size(Xtr, 1)],
         test_samples=[size(Xte, 1)],
@@ -300,6 +309,9 @@ function run_experiment(;
             "converged" => converged,
             "hit_max_iterations" => hit_max_iterations,
             "stop_reason" => stop_reason,
+
+            "train_time_sec" => train_time_sec,
+            "total_time_sec" => total_time_sec,
 
             "timestamp" => string(ts)
         )
