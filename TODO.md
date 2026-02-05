@@ -97,7 +97,25 @@ Tengo que:
 
 - aislar más la función de train
 
-- quitar el parámetro de _model_ y ver si hay que quitar también el de _norm_.
+
+04/02/2026
+
+- Debería guardar el árbol??
+
+Tengo que:
+
+- hacer la función de graficar (done)
+
+- cambiar cómo guardo los resultados (done)
+
+- aislar más la función de train (done)
+
+- quitar el parámetro de _model_ y ver si hay que quitar también el de _norm_: creo que se queda para reproducibilidad (done)
 
 - ver cómo mando todo el entorno al CESGA para evitar tener problemas
+
+- debería guardar las predicciones? pa graficar sep
+
+
+05/02/2025
 
