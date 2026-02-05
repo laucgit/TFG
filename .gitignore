@@ -3,3 +3,5 @@
 /plots
 /SymDoME.jl
 /results
+*.tar.gz
+*.bak
