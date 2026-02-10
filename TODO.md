@@ -117,7 +117,7 @@ Tengo que:
 - debería guardar las predicciones? pa graficar sep
 
 
-05/02/2025
+05/02/2026
 
 Tengo que :
 
@@ -125,6 +125,15 @@ Tengo que :
 
 - mandar al cesga los experimentos ejecutando con un solo dataset (done)
 
-Preguntar qué debo tener exactamente en el script del CESGA, es decir, qué parámetros
+Preguntar qué debo tener exactamente en el script del CESGA, es decir, qué parámetros (done)
 
 - yo añadiría lo de la notificación de end/fail del job en el CESGA
+
+- escribir todo lo de hasta ahora en la memoria
+
+
+10/02/2026
+
+El primer dataset ya se está ejecutando en el CESGA.
+La memoria está avanzada en el capítulo de la parte de DoME sin SL.
+
