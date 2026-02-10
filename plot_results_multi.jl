@@ -1,322 +1,363 @@
 # Headless para HPC: ponerlo ANTES de cargar Plots/GR
 ENV["GKSwstype"] = "100"
 
-using CSV
 using DataFrames
-using Plots
+using CSV
 using Statistics
+using Plots
+using JLD2
 
 gr()
 
-"""
-Plot de resultados para DoME (compatible con tu pipeline nuevo).
-
-ENTRADA:
-- Un archivo *_predictions.csv (si guardas predicciones en una segunda pasada)
-
-Soporta columnas:
-- Formato legacy: y_true, y_pred, error
-- Formato nuevo (preferente): y_true_raw, y_pred_raw, error_raw
-- También soporta norm: y_true_norm, y_pred_norm, error_norm
-
-Por defecto usa RAW si existe; si no, NORM; si no, legacy.
-"""
-
-# =============================================================================
-# UTIL: normalizar nombres de columnas a y_true/y_pred/error
-# =============================================================================
-function standardize_predictions(pred_df::DataFrame; mode::Symbol=:auto)
-    cols = Set(names(pred_df))
-
-    # 1) legacy ya ok
-    if all(in.(["y_true","y_pred","error"], Ref(cols)))
-        return pred_df, "legacy"
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+prettify_strategy(s::AbstractString) = begin
+    if occursin("SelectiveWithConstantOptimization", s) || occursin("WithConstantOptimization", s)
+        "Selective+const"
+        elseif occursin("Selective", s)
+        "Selective"
+        elseif occursin("Strategy4", s)
+        "Selective"
+        elseif occursin("Strategy3", s)
+        "Selective+const"
+    else
+        s
     end
+end
 
-    # 2) decidir modo
-    chosen = mode
-    if mode == :auto
-        if all(in.(["y_true_raw","y_pred_raw"], Ref(cols)))
-            chosen = :raw
-        elseif all(in.(["y_true_norm","y_pred_norm"], Ref(cols)))
-            chosen = :norm
-        else
-            chosen = :none
+function safe_first(df::DataFrame, col::Symbol, default)
+    try
+        if nrow(df) >= 1 && (col in names(df))
+            v = df[1, col]
+            return (v === missing || v === nothing) ? default : v
         end
+    catch
     end
-
-    if chosen == :raw
-        y_true = pred_df.y_true_raw
-        y_pred = pred_df.y_pred_raw
-        # si existe error_raw lo ignoramos para fijar signo consistente (y - ŷ)
-        err = y_true .- y_pred
-        df = DataFrame(y_true=y_true, y_pred=y_pred, error=err)
-        return df, "raw"
-
-    elseif chosen == :norm
-        y_true = pred_df.y_true_norm
-        y_pred = pred_df.y_pred_norm
-        err = y_true .- y_pred
-        df = DataFrame(y_true=y_true, y_pred=y_pred, error=err)
-        return df, "norm"
-    end
-
-    error("No encuentro columnas compatibles. Esperaba y_true/y_pred/error o y_true_raw/y_pred_raw o y_true_norm/y_pred_norm.")
+    return default
 end
 
-# =============================================================================
-# FUNCIONES DE ANÁLISIS
-# =============================================================================
-
-function rolling_mean(x::AbstractVector{<:Real}, window::Int)
-    x = Float64.(x)
-    n = length(x)
-    n < window && return x
-    result = zeros(n)
-    for i in 1:n
-        start_idx = max(1, i - window + 1)
-        result[i] = mean(x[start_idx:i])
+function tofloat(x, default=NaN)
+    if x === missing || x === nothing
+        return default
     end
-    return result
+    try
+        return Float64(x)
+    catch
+        return default
+    end
 end
 
-function mse_by_blocks(errors::AbstractVector{<:Real}, n_blocks::Int=10)
-    errors = Float64.(errors)
-    n = length(errors)
-    block_size = div(n, n_blocks)
-
-    if block_size < 1
-        return [mean(errors.^2)], [n/2]
+function toint(x, default=missing)
+    if x === missing || x === nothing
+        return default
     end
+    try
+        return Int(x)
+    catch
+        return default
+    end
+end
 
-    block_mses = Float64[]
-    block_centers = Float64[]
+# -----------------------------------------------------------------------------
+# Cargar 1 .jld2 (robusto a faltas / errores)
+# -----------------------------------------------------------------------------
+function read_one_jld2(file::String)
+    # defaults (evito missing en floats para que nunca crashee con isnan)
+    status = "ok"
+    dataset = ""
+    window = missing
+    config_id = missing
+    seed = missing
+    max_nodes = missing
+    min_improvement = NaN
+    use_division = missing
+    strategy = ""
+    strategy_label = ""
+    mse_test_raw = Inf
+    mse_test_norm = NaN
+    train_time_sec = NaN
+    test_time_sec = NaN
+    total_time_sec = NaN
+    timestamp = ""
 
-    for i in 1:n_blocks
-        start_idx = (i-1) * block_size + 1
-        end_idx = (i == n_blocks) ? n : i * block_size
-        if end_idx >= start_idx
-            block_errors = errors[start_idx:end_idx]
-            push!(block_mses, mean(block_errors.^2))
-            push!(block_centers, (start_idx + end_idx) / 2)
+    # Para plots de drift (opcional)
+    predictions_df = nothing
+
+    try
+        d = JLD2.load(file)  # Dict{String,Any}
+
+        # status (si existe)
+        status = haskey(d, "status") ? string(d["status"]) : "ok"
+
+        # dataset/window/seed si existen sueltos
+        dataset = haskey(d, "dataset") ? string(d["dataset"]) : ""
+        window  = haskey(d, "window") ? toint(d["window"], missing) : missing
+        seed    = haskey(d, "seed")   ? toint(d["seed"], missing)   : missing
+
+        # cfg (hyperparams)
+        if haskey(d, "cfg") && d["cfg"] !== nothing
+            cfg = d["cfg"]
+            max_nodes      = haskey(cfg, "maxNumNodes") ? toint(cfg["maxNumNodes"], missing) : max_nodes
+            min_improvement = haskey(cfg, "minimumReductionMSE") ? tofloat(cfg["minimumReductionMSE"], NaN) : min_improvement
+            use_division   = haskey(cfg, "useDivisionOperator") ? Bool(cfg["useDivisionOperator"]) : use_division
+            strategy       = haskey(cfg, "strategyName") ? string(cfg["strategyName"]) : strategy
         end
+
+        # métricas sueltas (si existen)
+        if haskey(d, "mse_test_raw");   mse_test_raw   = tofloat(d["mse_test_raw"], Inf) end
+        if haskey(d, "total_time_sec"); total_time_sec = tofloat(d["total_time_sec"], NaN) end
+        if haskey(d, "fit_time_sec");   train_time_sec = tofloat(d["fit_time_sec"], NaN) end
+        if haskey(d, "test_time_sec");  test_time_sec  = tofloat(d["test_time_sec"], NaN) end
+        if haskey(d, "config_id");      config_id      = toint(d["config_id"], missing) end
+
+        # results_df (fallback)
+        if haskey(d, "results_df") && d["results_df"] !== nothing
+            rdf = d["results_df"]::DataFrame
+
+            if dataset == ""; dataset = string(safe_first(rdf, :dataset, "")) end
+            if window === missing; window = toint(safe_first(rdf, :window, missing), missing) end
+            if config_id === missing; config_id = toint(safe_first(rdf, :config_id, missing), missing) end
+            if seed === missing; seed = toint(safe_first(rdf, :seed, missing), missing) end
+
+            if max_nodes === missing
+                max_nodes = toint(safe_first(rdf, :max_nodes, missing), missing)
+            end
+
+            if isnan(min_improvement)
+                min_improvement = tofloat(safe_first(rdf, :min_improvement, NaN), NaN)
+            end
+
+            if use_division === missing
+                v = safe_first(rdf, :use_division, missing)
+                use_division = (v === missing) ? use_division : Bool(v)
+            end
+
+            if strategy == ""
+                strategy = string(safe_first(rdf, :strategy, ""))
+            end
+
+            if !isfinite(mse_test_raw) || mse_test_raw == Inf
+                mse_test_raw = tofloat(safe_first(rdf, :mse_test_raw, Inf), Inf)
+            end
+
+            mse_test_norm  = tofloat(safe_first(rdf, :mse_test_norm, NaN), NaN)
+            train_time_sec = tofloat(safe_first(rdf, :train_time_sec, train_time_sec), train_time_sec)
+            total_time_sec = tofloat(safe_first(rdf, :total_time_sec, total_time_sec), total_time_sec)
+            timestamp      = string(safe_first(rdf, :timestamp, ""))
+        end
+
+        # predictions_df (si existe)
+        if haskey(d, "predictions_df") && d["predictions_df"] !== nothing
+            predictions_df = d["predictions_df"]::DataFrame
+        end
+
+        strategy_label = prettify_strategy(strategy)
+
+        # Si status != ok, lo marcamos como no elegible (MSE=Inf)
+        if lowercase(status) != "ok"
+            mse_test_raw = Inf
+        end
+
+    catch
+        status = "read_error"
+        mse_test_raw = Inf
+        strategy_label = ""
     end
 
-    return block_mses, block_centers
+    return (
+        file=file,
+        status=status,
+        dataset=dataset,
+        window=window,
+        config_id=config_id,
+        seed=seed,
+        max_nodes=max_nodes,
+        min_improvement=min_improvement,
+        use_division=use_division,
+        strategy=strategy,
+        strategy_label=strategy_label,
+        mse_test_raw=mse_test_raw,
+        mse_test_norm=mse_test_norm,
+        train_time_sec=train_time_sec,
+        test_time_sec=test_time_sec,
+        total_time_sec=total_time_sec,
+        timestamp=timestamp,
+        predictions_df=predictions_df
+        )
 end
 
-function drift_statistics(errors::AbstractVector{<:Real})
-    errors = Float64.(errors)
-    n = length(errors)
-    t = collect(1:n)
-    squared_errors = errors.^2
-
-    t_mean = mean(t)
-    y_mean = mean(squared_errors)
-    b = sum((t .- t_mean) .* (squared_errors .- y_mean)) / sum((t .- t_mean).^2)
-    a = y_mean - b * t_mean
-    corr_val = cor(t, squared_errors)
-
-    return Dict(
-        "slope" => b,
-        "intercept" => a,
-        "correlation" => corr_val,
-        "trend_direction" => b > 0 ? "creciente" : "decreciente"
-    )
-end
-
-# =============================================================================
-# FUNCIONES DE GRAFICADO
-# =============================================================================
-
-function plot_temporal_error(pred_df::DataFrame, window::Int=50)
-    errors = pred_df.error
-    abs_errors = abs.(errors)
-    squared_errors = errors.^2
-    n = length(errors)
-    t = 1:n
-
-    rolling_abs = rolling_mean(abs_errors, window)
-    rolling_sq  = rolling_mean(squared_errors, window)
-
-    p1 = plot(t, abs_errors,
-        label="|y-ŷ|", alpha=0.3, color=:gray,
-        xlabel="Índice temporal (test)", ylabel="Error absoluto",
-        title="Error absoluto (drift)", legend=:topright, linewidth=0.5
-    )
-    plot!(p1, t, rolling_abs, label="Media móvil (w=$window)", color=:red, linewidth=2)
-
-    p2 = plot(t, squared_errors,
-        label="(y-ŷ)²", alpha=0.3, color=:gray,
-        xlabel="Índice temporal (test)", ylabel="Error cuadrático",
-        title="Error cuadrático (MSE puntual)", legend=:topright, linewidth=0.5
-    )
-    plot!(p2, t, rolling_sq, label="Media móvil (w=$window)", color=:blue, linewidth=2)
-
-    mse_global = mean(squared_errors)
-    hline!(p2, [mse_global], label="MSE global", color=:green, linestyle=:dash, linewidth=2)
-
-    return plot(p1, p2, layout=(2,1), size=(1000, 800))
-end
-
-function plot_mse_blocks(pred_df::DataFrame, n_blocks::Int=10)
-    errors = pred_df.error
-    block_mses, block_centers = mse_by_blocks(errors, n_blocks)
-
-    p = bar(block_centers, block_mses,
-        xlabel="Centro del bloque", ylabel="MSE",
-        title="MSE por bloques (n=$n_blocks)", legend=false,
-        color=:steelblue, alpha=0.7
-    )
-
-    mse_global = mean(errors.^2)
-    hline!(p, [mse_global], label="MSE global", color=:red, linestyle=:dash, linewidth=2, legend=:topright)
-    return p
-end
-
-function plot_error_histogram(pred_df::DataFrame)
-    errors = pred_df.error
-    p = histogram(errors,
-        bins=50, xlabel="Error (y-ŷ)", ylabel="Frecuencia",
-        title="Distribución de errores", legend=false,
-        color=:steelblue, alpha=0.7, normalize=:probability
-    )
-    vline!(p, [0], color=:red, linestyle=:dash, linewidth=2)
-    annotate!(p, :topright, text("Media: $(round(mean(errors),digits=4))\nStd: $(round(std(errors),digits=4))", :left, 8))
-    return p
-end
-
-function plot_prediction_scatter(pred_df::DataFrame)
-    y_true = pred_df.y_true
-    y_pred = pred_df.y_pred
-
-    min_val = min(minimum(y_true), minimum(y_pred))
-    max_val = max(maximum(y_true), maximum(y_pred))
-
-    p = scatter(y_true, y_pred,
-        xlabel="y_true", ylabel="y_pred",
-        title="Predicción vs Real", legend=:topleft,
-        label="Puntos", alpha=0.5, markersize=3, color=:steelblue
-    )
-    plot!(p, [min_val, max_val], [min_val, max_val], label="Ideal", color=:red, linestyle=:dash, linewidth=2)
-
-    ss_res = sum((y_true .- y_pred).^2)
-    ss_tot = sum((y_true .- mean(y_true)).^2)
-    r2_text = ss_tot > 0 ? "R² = $(round(1 - ss_res/ss_tot, digits=4))" : "R² = N/A (y constante)"
-    annotate!(p, :topleft, text(r2_text, :left, 10))
-
-    return p
-end
-
-function plot_time_series(pred_df::DataFrame, max_points::Int=500)
-    n = nrow(pred_df)
-    indices = n > max_points ? (1:max(1, cld(n, max_points)):n) : (1:n)
-
-    y_true = pred_df.y_true[indices]
-    y_pred = pred_df.y_pred[indices]
-    t = collect(indices)
-
-    p = plot(t, y_true, label="Real", color=:black, linewidth=2,
-        xlabel="Índice temporal (test)", ylabel="Valor",
-        title="Serie temporal (submuestreada)", legend=:topright
-    )
-    plot!(p, t, y_pred, label="Predicción", color=:red, linewidth=1.5, linestyle=:dash)
-    return p
-end
-
-# =============================================================================
-# MAIN
-# =============================================================================
-
-function plot_experiment_diagnostics(
-    predictions_file::String;
-    output_file::Union{String,Nothing}=nothing,
-    rolling_window::Int=50,
-    n_blocks::Int=10,
-    mode::Symbol=:auto   # :auto | :raw | :norm
-)
-    println("="^70)
-    println("GENERANDO GRÁFICAS")
-    println("="^70)
-    println("Predictions file: $predictions_file")
-
-    isfile(predictions_file) || error("Archivo no encontrado: $predictions_file")
-
-    raw_df = CSV.read(predictions_file, DataFrame)
-    pred_df, used = standardize_predictions(raw_df; mode=mode)
-    println("  Filas: $(nrow(pred_df)) | Usando modo: $used")
-
-    drift_stats = drift_statistics(pred_df.error)
-    println("  Pendiente (MSE): $(round(drift_stats["slope"], digits=8))")
-    println("  Corr(t, MSE):    $(round(drift_stats["correlation"], digits=4))")
-    println("  Tendencia:       $(drift_stats["trend_direction"])")
-
-    if output_file === nothing
-        base = replace(predictions_file, ".csv" => "")
-        output_file = "$(base)_diagnostics.pdf"
-    end
-
-    p1 = plot_temporal_error(pred_df, rolling_window)
-    p2 = plot_mse_blocks(pred_df, n_blocks)
-    p3 = plot_error_histogram(pred_df)
-    p4 = plot_prediction_scatter(pred_df)
-    p5 = plot_time_series(pred_df)
-
-    final_plot = plot(p1, p2, p3, p4, p5, layout=(5,1), size=(1200, 2400))
-    savefig(final_plot, output_file)
-
-    println("✓ Guardado: $output_file")
-    println("="^70)
-    return drift_stats
-end
-
-function plot_all_experiments(results_dir::String="results"; rolling_window::Int=50, n_blocks::Int=10, mode::Symbol=:auto)
+# -----------------------------------------------------------------------------
+# Recoger todos los .jld2 de un directorio (recursivo)
+# -----------------------------------------------------------------------------
+function collect_results(results_dir::String)
     isdir(results_dir) || error("Directorio no encontrado: $results_dir")
-    pred_files = filter(f -> endswith(f, "_predictions.csv"), readdir(results_dir, join=true))
 
-    if isempty(pred_files)
-        println("No hay *_predictions.csv en $results_dir")
-        return
-    end
-
-    drift_summary = DataFrame(file=String[], slope=Float64[], correlation=Float64[], trend=String[], mode=String[])
-
-    for (i, f) in enumerate(pred_files)
-        println("\n[$i/$(length(pred_files))] $(basename(f))")
-        try
-            stats = plot_experiment_diagnostics(f; rolling_window=rolling_window, n_blocks=n_blocks, mode=mode)
-            push!(drift_summary, (basename(f), stats["slope"], stats["correlation"], stats["trend_direction"], string(mode)))
-        catch e
-            println("  ✗ ERROR: $e")
+    files = String[]
+    for (root, _, fs) in walkdir(results_dir)
+        for f in fs
+            endswith(f, ".jld2") || continue
+            push!(files, joinpath(root, f))
         end
     end
+    sort!(files)
 
-    summary_file = joinpath(results_dir, "drift_summary.csv")
-    CSV.write(summary_file, drift_summary)
-    println("\n✓ Resumen drift: $summary_file")
-    return drift_summary
+    rows = DataFrame(
+        file=String[],
+        status=String[],
+        dataset=String[],
+        window=Int[],
+        config_id=Int[],
+        seed=Int[],
+        max_nodes=Int[],
+        min_improvement=Float64[],
+        use_division=Bool[],
+        strategy=String[],
+        strategy_label=String[],
+        mse_test_raw=Float64[],
+        mse_test_norm=Float64[],
+        train_time_sec=Float64[],
+        test_time_sec=Float64[],
+        total_time_sec=Float64[],
+        timestamp=String[]
+        )
+
+    for f in files
+        r = read_one_jld2(f)
+
+        # descartamos si window/max_nodes faltan
+        if r.window === missing || r.max_nodes === missing
+            continue
+        end
+
+        push!(rows, (
+            r.file,
+            r.status,
+            r.dataset,
+            Int(r.window),
+            r.config_id === missing ? -1 : Int(r.config_id),
+            r.seed === missing ? -1 : Int(r.seed),
+            Int(r.max_nodes),
+            Float64(r.min_improvement),
+            r.use_division === missing ? false : Bool(r.use_division),
+            r.strategy,
+            r.strategy_label,
+            Float64(r.mse_test_raw),
+            Float64(r.mse_test_norm),
+            Float64(r.train_time_sec),
+            Float64(r.test_time_sec),
+            Float64(r.total_time_sec),
+            r.timestamp
+            ))
+    end
+
+    return rows
+end
+
+# -----------------------------------------------------------------------------
+# TopK por window
+# -----------------------------------------------------------------------------
+function topk_by_window(df::DataFrame; k::Int=10)
+    out = DataFrame()
+    for w in sort(unique(df.window))
+        sub = df[df.window .== w, :]
+        sub = sort(sub, [:mse_test_raw, :total_time_sec])
+        subk = first(sub, min(k, nrow(sub)))
+        out = vcat(out, subk)
+    end
+    return out
+end
+
+# -----------------------------------------------------------------------------
+# Mejor por (window, strategy, max_nodes) minimizando MSE
+# -----------------------------------------------------------------------------
+function best_by_nodes(df::DataFrame)
+    df_ok = df[isfinite.(df.mse_test_raw), :]
+    g = groupby(df_ok, [:window, :strategy_label, :max_nodes])
+    best = combine(g) do sub
+        idx = argmin(sub.mse_test_raw)
+        sub[idx, [:window, :strategy_label, :max_nodes, :min_improvement, :config_id, :seed,
+                  :mse_test_raw, :total_time_sec, :train_time_sec, :test_time_sec, :file]]
+    end
+    sort!(best, [:window, :strategy_label, :max_nodes])
+    return best
+end
+
+# -----------------------------------------------------------------------------
+# Plots agregados
+# -----------------------------------------------------------------------------
+function plot_mse_vs_nodes(best::DataFrame, out_dir::String)
+    for w in sort(unique(best.window))
+        subw = best[best.window .== w, :]
+        nrow(subw) == 0 && continue
+
+        p = plot(
+            xlabel="MaxNumNodes",
+            ylabel="Mejor MSE (test, raw)",
+            title="Mejor MSE vs nodos (window=$w)",
+            legend=:topright
+            )
+
+        for strat in sort(unique(subw.strategy_label))
+            subs = subw[subw.strategy_label .== strat, :]
+            sort!(subs, :max_nodes)
+            plot!(p, subs.max_nodes, subs.mse_test_raw, label=strat)
+        end
+
+        savefig(p, joinpath(out_dir, "mse_vs_nodes_w$(w).pdf"))
+    end
+end
+
+function plot_time_vs_nodes(best::DataFrame, out_dir::String)
+    for w in sort(unique(best.window))
+        subw = best[best.window .== w, :]
+        nrow(subw) == 0 && continue
+
+        p = plot(
+            xlabel="MaxNumNodes",
+            ylabel="Tiempo total (s)",
+            title="Tiempo vs nodos (window=$w) [mejor config por nodo]",
+            legend=:topleft
+            )
+
+        for strat in sort(unique(subw.strategy_label))
+            subs = subw[subw.strategy_label .== strat, :]
+            sort!(subs, :max_nodes)
+            plot!(p, subs.max_nodes, subs.total_time_sec, label=strat)
+        end
+
+        savefig(p, joinpath(out_dir, "time_vs_nodes_w$(w).pdf"))
+    end
+end
+
+# -----------------------------------------------------------------------------
+# MAIN
+# -----------------------------------------------------------------------------
+function run_dir(results_dir::String; topk::Int=10)
+    df = collect_results(results_dir)
+    out_dir = joinpath(results_dir, "plots")
+    mkpath(out_dir)
+
+    CSV.write(joinpath(out_dir, "summary_all_runs.csv"), df)
+
+    tk = topk_by_window(df; k=topk)
+    CSV.write(joinpath(out_dir, "topK_by_window.csv"), tk)
+
+    best = best_by_nodes(df)
+    CSV.write(joinpath(out_dir, "best_by_nodes.csv"), best)
+
+    plot_mse_vs_nodes(best, out_dir)
+    plot_time_vs_nodes(best, out_dir)
+
+    println("✓ Listo. Salida en: $out_dir")
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    if length(ARGS) == 0
-        println("Uso:")
-        println("  julia plot_results_multi.jl <predictions_file.csv> [raw|norm]")
-        println("  julia plot_results_multi.jl --all [raw|norm]")
-        exit(1)
-    end
+    isempty(ARGS) && error("Uso: julia --project=. plot_results_multi.jl <results_dir> [topk]")
 
-    mode = :auto
-    if length(ARGS) >= 2
-        if ARGS[2] == "raw"
-            mode = :raw
-        elseif ARGS[2] == "norm"
-            mode = :norm
-        end
-    end
+    path = ARGS[1]
+    isdir(path) || error("Ruta no válida (no es directorio): $path")
 
-    if ARGS[1] == "--all"
-        plot_all_experiments("results"; mode=mode)
-    else
-        plot_experiment_diagnostics(ARGS[1]; mode=mode)
-    end
+    topk = (length(ARGS) >= 2) ? parse(Int, ARGS[2]) : 10
+    run_dir(path; topk=topk)
 end

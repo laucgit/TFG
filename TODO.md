@@ -126,3 +126,5 @@ Tengo que :
 - mandar al cesga los experimentos ejecutando con un solo dataset (done)
 
 Preguntar qué debo tener exactamente en el script del CESGA, es decir, qué parámetros
+
+- yo añadiría lo de la notificación de end/fail del job en el CESGA
