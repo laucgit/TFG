@@ -137,3 +137,8 @@ Preguntar qué debo tener exactamente en el script del CESGA, es decir, qué par
 El primer dataset ya se está ejecutando en el CESGA.
 La memoria está avanzada en el capítulo de la parte de DoME sin SL.
 
+12/02/2026
+
+Tuve problemas con el script y el guardado de los .jd2 pero ya está resuelto y ahora faltan las últimas configuraciones con ese dataset, pero faltan los demás, me preocupa que no lleguen, hay que ir apresurando esa parte.
+La memoria está avanzada en el capítulo de la parte de DoME sin SL, corregidos los detalles grandes de la primera parte, falta corregir los detalles pequeños, y luego reafinar la parte de después de los resultados.
+Debería cambiar el script de analizar para que me vaya ya dando resultados para graficar.
