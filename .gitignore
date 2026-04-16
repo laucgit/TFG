@@ -6,3 +6,5 @@
 *.bak
 /backup
 *.zip
+*.py
+/data_old
